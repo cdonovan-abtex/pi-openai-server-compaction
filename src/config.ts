@@ -17,6 +17,8 @@ export type ExtensionConfig = {
   thresholdRatio?: number;
   notify?: boolean;
   usePreviousResponseId?: boolean;
+  remoteMaxRetries?: number;
+  remoteRetryBaseDelayMs?: number;
 };
 
 export function isRecord(value: unknown): value is JsonRecord {
@@ -52,6 +54,13 @@ function toPositiveNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function toNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value === "string" && !value.trim()) return undefined;
+  const numeric = typeof value === "string" ? Number(value) : value;
+  if (typeof numeric !== "number" || !Number.isFinite(numeric) || numeric < 0) return undefined;
+  return Math.floor(numeric);
+}
+
 export function loadConfig(cwd: string): Required<ExtensionConfig> {
   const globalPath = join(homedir(), ".pi", "agent", "openai-server-compaction.json");
   const projectPath = join(cwd, ".pi", "openai-server-compaction.json");
@@ -84,6 +93,14 @@ export function loadConfig(cwd: string): Required<ExtensionConfig> {
       toBoolean(process.env.PI_OPENAI_SERVER_COMPACTION_PREVIOUS_RESPONSE_ID) ??
       toBoolean(merged.usePreviousResponseId) ??
       true,
+    remoteMaxRetries:
+      toNonNegativeInteger(process.env.PI_OPENAI_SERVER_COMPACTION_MAX_RETRIES) ??
+      toNonNegativeInteger(merged.remoteMaxRetries) ??
+      3,
+    remoteRetryBaseDelayMs:
+      toNonNegativeInteger(process.env.PI_OPENAI_SERVER_COMPACTION_RETRY_BASE_DELAY_MS) ??
+      toNonNegativeInteger(merged.remoteRetryBaseDelayMs) ??
+      1_000,
   };
 }
 

@@ -249,15 +249,24 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
         reasoning,
         text,
         signal: event.signal,
+        maxRetries: cfg.remoteMaxRetries,
+        retryBaseDelayMs: cfg.remoteRetryBaseDelayMs,
       }),
     ]);
 
     if (remoteResult.status !== "fulfilled") {
+      const message =
+        remoteResult.reason instanceof Error ? remoteResult.reason.message : String(remoteResult.reason);
       if (localResult.status === "fulfilled") {
+        if (!event.signal.aborted && ctx.hasUI) {
+          ctx.ui.notify(
+            `OpenAI remote compaction failed; saved a text-only fallback. Opaque continuity was not preserved. ${message}`,
+            "warning",
+          );
+        }
         return { compaction: localResult.value };
       }
       if (!event.signal.aborted && ctx.hasUI) {
-        const message = remoteResult.reason instanceof Error ? remoteResult.reason.message : String(remoteResult.reason);
         ctx.ui.notify(`OpenAI remote compaction failed; falling back to default compaction. ${message}`, "warning");
       }
       return undefined;

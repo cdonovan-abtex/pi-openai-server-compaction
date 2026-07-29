@@ -32,6 +32,8 @@
 - Force `/compact` in a supported session.
 - Confirm extension returns a Pi compaction entry.
 - Inspect the session JSONL and confirm `details.remoteCompaction.replacementHistory` exists.
+- Inject a transient HTTP or streamed `server_error`; confirm bounded exponential-backoff retries and immediate abort behavior.
+- Exhaust the retry budget; confirm Pi warns that it saved only the text fallback and does not claim `details.remoteCompaction`.
 - Continue the session and confirm later compatible turns still behave coherently.
 - Confirm `details.remoteCompaction.implementation` is `responses_compaction_v2`.
 - Confirm replacement history ends with an opaque `compaction` item and retains only the recent user-message budget outside that item.
@@ -71,6 +73,8 @@ PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol node --experimen
 The automated live harness lives in `tests/live/openai-compaction-rpc-live.ts`.
 
 Current automated coverage includes:
+- nested streamed provider-error parsing
+- transient retry success, bounded exhaustion, non-retryable 4xx behavior, `Retry-After`, and abort during backoff
 - compaction continuity in the same session
 - `/model`-style switch away and back again
 - fork after compaction

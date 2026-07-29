@@ -82,6 +82,14 @@ export type RemoteCompactionUsageSnapshot = Usage;
 const IMAGE_CONTENT_OMITTED_PLACEHOLDER = "image content omitted because you do not support image input";
 const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
 const RETAINED_MESSAGE_TOKEN_BUDGET = 20_000;
+const DEFAULT_REMOTE_COMPACTION_MAX_RETRIES = 3;
+const DEFAULT_REMOTE_COMPACTION_RETRY_BASE_DELAY_MS = 1_000;
+const MAX_REMOTE_COMPACTION_RETRY_DELAY_MS = 60_000;
+const MAX_REMOTE_COMPACTION_RETRIES = 10;
+const RETRYABLE_REMOTE_COMPACTION_ERROR_PATTERN =
+  /server.?error|internal.?error|overloaded|rate.?limit|too many requests|service.?unavailable|temporar(?:y|ily)|timeout|timed? out|network.?error|connection|fetch failed|socket|upstream|reset before headers|you can retry your request|please retry/i;
+const NON_RETRYABLE_REMOTE_COMPACTION_LIMIT_PATTERN =
+  /insufficient_quota|quota exceeded|out of budget|billing|usage limit/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type RemoteCompactionDetails = {
@@ -857,6 +865,30 @@ type RemoteCompactionV2Events = {
   usage?: unknown;
 };
 
+type RemoteCompactionFetch = typeof fetch;
+type RemoteCompactionSleep = (delayMs: number, signal?: AbortSignal) => Promise<void>;
+
+type RemoteCompactionErrorOptions = {
+  retryable?: boolean;
+  retryAfterMs?: number;
+  code?: string;
+  cause?: unknown;
+};
+
+class RemoteCompactionError extends Error {
+  readonly retryable: boolean;
+  readonly retryAfterMs?: number;
+  readonly code?: string;
+
+  constructor(message: string, options: RemoteCompactionErrorOptions = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "RemoteCompactionError";
+    this.retryable = options.retryable ?? false;
+    this.retryAfterMs = options.retryAfterMs;
+    this.code = options.code;
+  }
+}
+
 function parseSseData(text: string): unknown[] {
   return text
     .replace(/\r\n/g, "\n")
@@ -877,6 +909,25 @@ function parseSseData(text: string): unknown[] {
     });
 }
 
+function remoteCompactionProviderError(payload: unknown, fallback: string): RemoteCompactionError {
+  const error = isRecord(payload) ? payload : {};
+  const message = typeof error.message === "string" && error.message.trim() ? error.message : fallback;
+  const code =
+    typeof error.code === "string" && error.code.trim()
+      ? error.code
+      : typeof error.type === "string" && error.type.trim()
+        ? error.type
+        : undefined;
+  const classificationText = `${code ?? ""} ${typeof error.type === "string" ? error.type : ""} ${message}`;
+  const retryable =
+    !NON_RETRYABLE_REMOTE_COMPACTION_LIMIT_PATTERN.test(classificationText) &&
+    RETRYABLE_REMOTE_COMPACTION_ERROR_PATTERN.test(classificationText);
+  return new RemoteCompactionError(
+    `OpenAI remote compaction v2 failed${code ? ` [${code}]` : ""}: ${message}`,
+    { retryable, code },
+  );
+}
+
 export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompactionV2Events {
   let completed = false;
   let usage: unknown;
@@ -885,14 +936,14 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
   for (const event of events) {
     if (!isRecord(event)) continue;
     if (event.type === "error") {
-      const message = typeof event.message === "string" ? event.message : "Unknown Responses API error";
-      throw new Error(`OpenAI remote compaction v2 failed: ${message}`);
+      throw remoteCompactionProviderError(
+        isRecord(event.error) ? event.error : event,
+        "Unknown Responses API error",
+      );
     }
     if (event.type === "response.failed") {
       const response = isRecord(event.response) ? event.response : undefined;
-      const error = response && isRecord(response.error) ? response.error : undefined;
-      const message = typeof error?.message === "string" ? error.message : "Response failed";
-      throw new Error(`OpenAI remote compaction v2 failed: ${message}`);
+      throw remoteCompactionProviderError(response?.error, "Response failed");
     }
     if (event.type === "response.output_item.done" && isResponseItem(event.item)) {
       if (event.item.type === "compaction") compactionItems.push(event.item);
@@ -906,34 +957,105 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
   }
 
   if (!completed) {
-    throw new Error("OpenAI remote compaction v2 stream ended before response.completed.");
+    throw new RemoteCompactionError(
+      "OpenAI remote compaction v2 stream ended before response.completed.",
+      { retryable: true },
+    );
   }
   if (compactionItems.length !== 1) {
-    throw new Error(
+    throw new RemoteCompactionError(
       `OpenAI remote compaction v2 expected exactly one compaction item, got ${compactionItems.length}.`,
     );
   }
   return { compactionItem: compactionItems[0], usage };
 }
 
-export async function callRemoteCompactionEndpoint(params: {
-  model: Model<any>;
-  apiKey: string;
-  headers?: Record<string, string>;
-  sessionId?: string;
-  input: ResponseItem[];
-  instructions?: string;
-  tools: Record<string, unknown>[];
-  parallelToolCalls: boolean;
-  reasoning?: ResponsesReasoningConfig;
-  text?: ResponsesTextConfig;
-  signal?: AbortSignal;
-}): Promise<RemoteCompactionResult> {
-  if (!supportsRemoteCompactionModel(params.model)) {
-    throw new Error("Remote compaction v2 is currently only enabled for supported OpenAI-compatible Responses models.");
+function retryAfterDelayMs(headers: Headers): number | undefined {
+  const retryAfterMs = headers.get("retry-after-ms");
+  if (retryAfterMs !== null) {
+    const millis = Number(retryAfterMs);
+    if (Number.isFinite(millis)) return Math.max(0, millis);
   }
 
-  const response = await fetch(remoteCompactionV2EndpointUrl(params.model), {
+  const retryAfter = headers.get("retry-after");
+  if (!retryAfter) return undefined;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+  const date = Date.parse(retryAfter);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+function httpErrorMessage(text: string, statusText: string): string {
+  if (!text.trim()) return statusText;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (isRecord(parsed)) {
+      const error = isRecord(parsed.error) ? parsed.error : parsed;
+      if (typeof error.message === "string" && error.message.trim()) return error.message;
+    }
+  } catch {
+    // Preserve non-JSON provider responses verbatim below.
+  }
+  return text;
+}
+
+function isRetryableHttpError(status: number, text: string): boolean {
+  if (NON_RETRYABLE_REMOTE_COMPACTION_LIMIT_PATTERN.test(text)) return false;
+  return [408, 409, 425, 429, 500, 502, 503, 504, 524].includes(status);
+}
+
+function remoteCompactionAbortError(): Error {
+  const error = new Error("Remote compaction was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function isRetryableRemoteCompactionError(error: unknown): boolean {
+  if (error instanceof RemoteCompactionError) return error.retryable;
+  if (!(error instanceof Error)) return false;
+  if (NON_RETRYABLE_REMOTE_COMPACTION_LIMIT_PATTERN.test(error.message)) return false;
+  return error instanceof TypeError || RETRYABLE_REMOTE_COMPACTION_ERROR_PATTERN.test(error.message);
+}
+
+function normalizedRetryCount(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_REMOTE_COMPACTION_MAX_RETRIES;
+  return Math.min(MAX_REMOTE_COMPACTION_RETRIES, Math.max(0, Math.floor(value)));
+}
+
+function normalizedBaseDelayMs(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_REMOTE_COMPACTION_RETRY_BASE_DELAY_MS;
+  return Math.min(MAX_REMOTE_COMPACTION_RETRY_DELAY_MS, Math.max(0, Math.floor(value)));
+}
+
+function sleepForRemoteCompactionRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(remoteCompactionAbortError());
+      return;
+    }
+
+    let timeout: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(remoteCompactionAbortError());
+    };
+    timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function callRemoteCompactionEndpointOnce(
+  params: Parameters<typeof callRemoteCompactionEndpoint>[0],
+  fetchImpl: RemoteCompactionFetch,
+): Promise<RemoteCompactionResult> {
+  const response = await fetchImpl(remoteCompactionV2EndpointUrl(params.model), {
     method: "POST",
     headers: buildRemoteCompactionHeaders({
       model: params.model,
@@ -956,7 +1078,14 @@ export async function callRemoteCompactionEndpoint(params: {
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`OpenAI remote compaction v2 failed (${response.status}): ${text || response.statusText}`);
+    throw new RemoteCompactionError(
+      `OpenAI remote compaction v2 failed (${response.status}): ${httpErrorMessage(text, response.statusText)}`,
+      {
+        retryable: isRetryableHttpError(response.status, text),
+        retryAfterMs: retryAfterDelayMs(response.headers),
+        code: String(response.status),
+      },
+    );
   }
 
   const responseText = await response.text();
@@ -965,6 +1094,64 @@ export async function callRemoteCompactionEndpoint(params: {
     output: buildRemoteCompactionV2History(params.input, parsed.compactionItem),
     usage: extractRemoteCompactionUsage(params.model, parsed.usage),
   };
+}
+
+export async function callRemoteCompactionEndpoint(params: {
+  model: Model<any>;
+  apiKey: string;
+  headers?: Record<string, string>;
+  sessionId?: string;
+  input: ResponseItem[];
+  instructions?: string;
+  tools: Record<string, unknown>[];
+  parallelToolCalls: boolean;
+  reasoning?: ResponsesReasoningConfig;
+  text?: ResponsesTextConfig;
+  signal?: AbortSignal;
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
+  fetchImpl?: RemoteCompactionFetch;
+  sleepImpl?: RemoteCompactionSleep;
+}): Promise<RemoteCompactionResult> {
+  if (!supportsRemoteCompactionModel(params.model)) {
+    throw new Error("Remote compaction v2 is currently only enabled for supported OpenAI-compatible Responses models.");
+  }
+
+  const maxRetries = normalizedRetryCount(params.maxRetries);
+  const baseDelayMs = normalizedBaseDelayMs(params.retryBaseDelayMs);
+  const fetchImpl = params.fetchImpl ?? fetch;
+  const sleepImpl = params.sleepImpl ?? sleepForRemoteCompactionRetry;
+  let attempts = 0;
+
+  for (;;) {
+    attempts += 1;
+    try {
+      return await callRemoteCompactionEndpointOnce(params, fetchImpl);
+    } catch (error) {
+      if (params.signal?.aborted) throw remoteCompactionAbortError();
+      if (isAbortError(error)) throw error;
+      const retriesExhausted = attempts > maxRetries;
+      if (!isRetryableRemoteCompactionError(error) || retriesExhausted) {
+        if (attempts === 1) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        throw new RemoteCompactionError(`${message} (after ${attempts} attempts)`, {
+          code: error instanceof RemoteCompactionError ? error.code : undefined,
+          cause: error,
+        });
+      }
+
+      const providerDelayMs =
+        error instanceof RemoteCompactionError ? error.retryAfterMs : undefined;
+      const delayMs = providerDelayMs ?? baseDelayMs * 2 ** (attempts - 1);
+      if (delayMs > MAX_REMOTE_COMPACTION_RETRY_DELAY_MS) {
+        throw new RemoteCompactionError(
+          `OpenAI remote compaction v2 requested a ${Math.ceil(delayMs / 1_000)}s retry delay (maximum ${MAX_REMOTE_COMPACTION_RETRY_DELAY_MS / 1_000}s).`,
+          { cause: error },
+        );
+      }
+      await sleepImpl(delayMs, params.signal);
+    }
+  }
 }
 
 export function buildRemoteCompactionDetails(

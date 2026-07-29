@@ -100,6 +100,7 @@ const {
   buildRemoteCompactionDetails,
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
+  callRemoteCompactionEndpoint,
   extractRemoteCompactionDetails,
   normalizeResponseItemsForPrompt,
   parseRemoteCompactionV2Events,
@@ -246,6 +247,149 @@ const parsedV2Events = parseRemoteCompactionV2Events([
   },
 ]);
 assert.equal(parsedV2Events.compactionItem.type, "compaction");
+
+const observedServerError = {
+  type: "error",
+  error: {
+    type: "server_error",
+    code: "server_error",
+    message: "An error occurred while processing your request. You can retry your request.",
+    param: null,
+  },
+  sequence_number: 2,
+};
+assert.throws(
+  () => parseRemoteCompactionV2Events([observedServerError]),
+  /\[server_error\].*You can retry your request/,
+  "nested Responses errors should retain their actionable provider message",
+);
+
+function responseEventStream(events) {
+  return new Response(
+    `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+const remoteRequest = {
+  model: {
+    provider: "openai",
+    api: "openai-responses",
+    id: "gpt-5.4-nano",
+    baseUrl: "https://api.openai.com/v1",
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  },
+  apiKey: "sk-test",
+  input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "retain" }] }],
+  tools: [],
+  parallelToolCalls: true,
+};
+const successfulCompactionEvents = [
+  {
+    type: "response.output_item.done",
+    item: { type: "compaction", encrypted_content: "RETRIED_ENCRYPTED" },
+  },
+  {
+    type: "response.completed",
+    response: { usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+  },
+];
+
+let transientAttempts = 0;
+const transientRetryDelays = [];
+const retriedCompaction = await callRemoteCompactionEndpoint({
+  ...remoteRequest,
+  maxRetries: 2,
+  retryBaseDelayMs: 25,
+  fetchImpl: async () => {
+    transientAttempts += 1;
+    return transientAttempts < 3
+      ? responseEventStream([observedServerError])
+      : responseEventStream(successfulCompactionEvents);
+  },
+  sleepImpl: async (delayMs) => {
+    transientRetryDelays.push(delayMs);
+  },
+});
+assert.equal(transientAttempts, 3, "server_error should be retried within the bounded budget");
+assert.deepEqual(transientRetryDelays, [25, 50], "retry backoff should be exponential");
+assert.equal(retriedCompaction.output.at(-1)?.type, "compaction");
+
+let nonRetryableAttempts = 0;
+await assert.rejects(
+  callRemoteCompactionEndpoint({
+    ...remoteRequest,
+    maxRetries: 3,
+    retryBaseDelayMs: 0,
+    fetchImpl: async () => {
+      nonRetryableAttempts += 1;
+      return new Response(JSON.stringify({ error: { message: "Invalid request payload" } }), {
+        status: 400,
+        statusText: "Bad Request",
+      });
+    },
+    sleepImpl: async () => {
+      throw new Error("non-retryable failures must not sleep");
+    },
+  }),
+  /failed \(400\): Invalid request payload/,
+);
+assert.equal(nonRetryableAttempts, 1, "deterministic 4xx errors should fail immediately");
+
+let exhaustedAttempts = 0;
+await assert.rejects(
+  callRemoteCompactionEndpoint({
+    ...remoteRequest,
+    maxRetries: 2,
+    retryBaseDelayMs: 0,
+    fetchImpl: async () => {
+      exhaustedAttempts += 1;
+      return responseEventStream([observedServerError]);
+    },
+    sleepImpl: async () => {},
+  }),
+  /after 3 attempts/,
+);
+assert.equal(exhaustedAttempts, 3, "retry exhaustion should remain bounded");
+
+let abortedAttempts = 0;
+const abortController = new AbortController();
+const abortedCompaction = callRemoteCompactionEndpoint({
+  ...remoteRequest,
+  signal: abortController.signal,
+  maxRetries: 3,
+  retryBaseDelayMs: 10_000,
+  fetchImpl: async () => {
+    abortedAttempts += 1;
+    return responseEventStream([observedServerError]);
+  },
+});
+queueMicrotask(() => abortController.abort());
+await assert.rejects(abortedCompaction, /aborted/i);
+assert.equal(abortedAttempts, 1, "abort during retry backoff should prevent another request");
+
+let retryAfterAttempts = 0;
+const retryAfterDelays = [];
+await callRemoteCompactionEndpoint({
+  ...remoteRequest,
+  maxRetries: 1,
+  retryBaseDelayMs: 1,
+  fetchImpl: async () => {
+    retryAfterAttempts += 1;
+    return retryAfterAttempts === 1
+      ? new Response("temporary outage", {
+          status: 503,
+          headers: { "retry-after-ms": "125" },
+        })
+      : responseEventStream(successfulCompactionEvents);
+  },
+  sleepImpl: async (delayMs) => {
+    retryAfterDelays.push(delayMs);
+  },
+});
+assert.deepEqual(retryAfterDelays, [125], "provider retry-after guidance should override local backoff");
+
 const v2History = buildRemoteCompactionV2History(
   [
     { type: "message", role: "user", content: [{ type: "input_text", text: "retain user" }] },

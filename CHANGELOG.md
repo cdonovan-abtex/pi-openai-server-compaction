@@ -8,6 +8,7 @@ This changelog intentionally starts at **0.1.0**.
 - replace the legacy `/responses/compact` call with Codex's current Responses compaction v2 protocol
 - stream a normal Responses request with a trailing `compaction_trigger` and persist the returned `compaction` item
 - retain recent user messages with the same 20K-token budget shape used by Codex while continuing to read legacy version 1 session artifacts
+- retry transient remote-compaction failures with bounded abort-aware backoff, preserve nested provider errors, and warn when only the portable text fallback is saved
 - add a reproducible native-vs-text compaction benchmark, retained GPT-5.6 Sol evidence, and a standalone report
 - add a fixed-context, information-density-calibrated product-defaults benchmark comparing Pi's real default compactor with the extension's real native replay policy
 - correct the earlier benchmark's same-budget interpretation: its text cap was selected after observing native output usage

@@ -111,6 +111,8 @@ The extension clears live continuation state on: session start/reload/resume, sw
 
 Remote compaction history is only replayed for compatible models. Cross-model turns are filtered from reconstructed replay history to prevent contamination after resume or tree navigation.
 
+Transient remote-compaction failures are retried up to three times after the initial request with abort-aware exponential backoff. Deterministic failures such as invalid requests and quota exhaustion fail immediately. If all retries fail but the portable summary succeeds, Pi saves the text-only summary and displays a warning that opaque continuity was not preserved.
+
 ## Data handling
 
 Users should be aware:
@@ -134,6 +136,8 @@ Config is read from:
   "thresholdRatio": 0.7,
   "compactThreshold": 0,
   "usePreviousResponseId": true,
+  "remoteMaxRetries": 3,
+  "remoteRetryBaseDelayMs": 1000,
   "notify": false
 }
 ```
@@ -147,6 +151,8 @@ Environment overrides:
 | `PI_OPENAI_SERVER_COMPACTION_THRESHOLD`            | Explicit compact threshold (tokens)                         |
 | `PI_OPENAI_SERVER_COMPACTION_RATIO`                | Compact threshold as ratio of context window (default: 0.7) |
 | `PI_OPENAI_SERVER_COMPACTION_PREVIOUS_RESPONSE_ID` | Enable/disable `previous_response_id`                       |
+| `PI_OPENAI_SERVER_COMPACTION_MAX_RETRIES`          | Retries after the initial remote request (default: 3; max: 10) |
+| `PI_OPENAI_SERVER_COMPACTION_RETRY_BASE_DELAY_MS`  | Initial retry delay in milliseconds (default: 1000; doubles each retry) |
 | `PI_OPENAI_SERVER_COMPACTION_NOTIFY`               | Show UI notifications when features activate                |
 
 ## Troubleshooting
@@ -154,10 +160,11 @@ Environment overrides:
 If something goes wrong:
 
 1. **Quick disable:** set `PI_OPENAI_SERVER_COMPACTION_ENABLED=0` or add `"enabled": false` to config
-2. **Bypass entirely:** run Pi with `--no-extensions`
-3. **Reload:** run `/reload` in Pi to re-initialize extensions
-4. **Uninstall:** `pi remove pi-openai-server-compaction`
-5. **Inspect:** check your session JSONL for `compaction` entries with `details.remoteCompaction` to see if remote compaction was recorded
+2. **Text-only fallback warning:** if Pi reports that opaque continuity was not preserved, compaction still completed with a portable summary but no remote artifact. Treat the warning as a real continuity downgrade; do not assume `details.remoteCompaction` exists.
+3. **Bypass entirely:** run Pi with `--no-extensions`
+4. **Reload:** run `/reload` in Pi to re-initialize extensions
+5. **Uninstall:** `pi remove pi-openai-server-compaction`
+6. **Inspect:** check your session JSONL for `compaction` entries with `details.remoteCompaction` to see if remote compaction was recorded
 
 ## Testing
 
