@@ -26,9 +26,8 @@ export type ResponsesRequestShapeState = {
 
 /**
  * A remote-compaction failure recorded during `session_before_compact` so it can
- * be surfaced after the compaction is committed. Notifications emitted from
- * inside `session_before_compact` are discarded by the TUI re-render that
- * follows the commit, so the warning has to survive the hook boundary.
+ * be surfaced after the compaction is committed, once the entry Pi actually
+ * saved is known.
  */
 export type PendingCompactionWarning = {
   message: string;

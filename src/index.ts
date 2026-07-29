@@ -61,11 +61,39 @@ type BranchEntry = {
 };
 
 type SessionContextLike = {
+  hasUI: boolean;
+  ui: {
+    setWidget(key: string, content: string[] | undefined): void;
+    theme: { fg(color: string, text: string): string };
+  };
   sessionManager: {
     getSessionId(): string;
     getBranch(): BranchEntry[];
   };
 };
+
+/**
+ * Key for the durable continuity-downgrade banner.
+ *
+ * Pi commits the compaction, emits `session_compact`, and only then emits
+ * `compaction_end`, whose interactive handler calls `chatContainer.clear()` and
+ * rebuilds the chat from the session messages. A `ui.notify` warning is a child
+ * of that container, so it is destroyed before the user can read it no matter
+ * which compaction hook emits it. Extension widgets live in their own container
+ * above the editor and survive the rebuild.
+ */
+const CONTINUITY_DOWNGRADE_WIDGET_KEY = "openai-server-compaction:continuity-downgrade";
+
+function showContinuityDowngradeWarning(ctx: SessionContextLike, message: string): void {
+  if (!ctx.hasUI) return;
+  ctx.ui.setWidget(CONTINUITY_DOWNGRADE_WIDGET_KEY, [ctx.ui.theme.fg("warning", `Warning: ${message}`)]);
+}
+
+/** Retracts the banner so a downgrade from an earlier compaction cannot linger. */
+function clearContinuityDowngradeWarning(ctx: SessionContextLike): void {
+  if (!ctx.hasUI) return;
+  ctx.ui.setWidget(CONTINUITY_DOWNGRADE_WIDGET_KEY, undefined);
+}
 
 function getSessionId(ctx: SessionContextLike): string {
   return ctx.sessionManager.getSessionId();
@@ -187,11 +215,13 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     const sessionId = getSessionId(ctx);
     clearLiveContinuation(sessionId);
     clearResponsesRequestShapeState(sessionId);
+    clearContinuityDowngradeWarning(ctx);
     syncRemoteState(ctx);
   });
 
   const clearBeforeSessionChange = (_event: unknown, ctx: SessionContextLike): void => {
     clearSessionRuntimeState(getSessionId(ctx));
+    clearContinuityDowngradeWarning(ctx);
   };
   pi.on("session_before_switch", clearBeforeSessionChange);
   pi.on("session_before_fork", clearBeforeSessionChange);
@@ -203,17 +233,16 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
   };
   pi.on("session_tree", syncAfterSessionChange);
 
-  // The compaction is committed by the time this fires, so a notification here
-  // survives the re-render that swallows anything emitted from
-  // `session_before_compact`.
+  // The compaction is committed by the time this fires, so the warning can be
+  // matched against the entry Pi actually saved.
   pi.on("session_compact", (event, ctx) => {
     const sessionId = getSessionId(ctx);
     const pending = takePendingCompactionWarning(sessionId);
     syncAfterSessionChange(event, ctx);
 
-    if (!pending || !ctx.hasUI) return;
+    if (!pending) return;
     if (pending.textOnlyFallback && !isTextOnlyFallbackCompaction(event.compactionEntry)) return;
-    ctx.ui.notify(pending.message, "warning");
+    showContinuityDowngradeWarning(ctx, pending.message);
   });
 
   pi.on("model_select", (_event, ctx) => {
@@ -228,8 +257,11 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
   pi.on("session_before_compact", async (event, ctx) => {
     const sessionId = getSessionId(ctx);
     // Drop any warning from an earlier compaction that never reached
-    // `session_compact` so it cannot resurface against this one.
+    // `session_compact` so it cannot resurface against this one, and retract a
+    // banner still standing from a previous downgrade: it describes a compaction
+    // this one supersedes.
     clearPendingCompactionWarning(sessionId);
+    clearContinuityDowngradeWarning(ctx);
 
     const cfg = loadConfig(ctx.cwd);
     const model = ctx.model;

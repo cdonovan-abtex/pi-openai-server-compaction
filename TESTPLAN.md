@@ -97,7 +97,7 @@ pre-fix behaviour for an A/B comparison instead of asserting the retry contract.
 Current automated coverage includes:
 - nested streamed provider-error parsing
 - transient retry success, bounded exhaustion, non-retryable 4xx behavior, `Retry-After`, and abort during backoff
-- retry-exhaustion warning deferral: withheld during `session_before_compact`, emitted once from `session_compact`, suppressed when opaque continuity survived, and dropped when the compaction is abandoned (`npm run smoke`)
+- retry-exhaustion warning: withheld during `session_before_compact`, then written once from `session_compact` to a durable extension widget rather than `ui.notify` — Pi's `compaction_end` handler clears and rebuilds the chat container, which destroys any notification a compaction hook emits. Also covered: suppressed when opaque continuity survived, retracted by the next compaction and by a session change, and dropped when the compaction is abandoned (`npm run smoke`)
 - compaction continuity in the same session
 - `/model`-style switch away and back again
 - fork after compaction

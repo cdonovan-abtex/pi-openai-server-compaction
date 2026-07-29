@@ -565,11 +565,12 @@ assert.deepEqual(incrementalInput, [
   },
 ]);
 
-// --- Retry-exhaustion warning is surfaced after the compaction is committed ---
+// --- Retry-exhaustion warning is surfaced on a surface the TUI cannot wipe ---
 //
-// Notifications emitted from inside session_before_compact are discarded by the
-// TUI re-render that follows the commit, so the warning has to be deferred to
-// session_compact.
+// Pi's compaction_end handler clears and rebuilds the chat container, so a
+// ui.notify warning is destroyed whichever compaction hook emits it. The warning
+// is withheld until session_compact (where the committed entry can be checked)
+// and then written to an extension widget, which lives outside that container.
 assert.equal(isTextOnlyFallbackCompaction({ fromHook: true }), true);
 assert.equal(isTextOnlyFallbackCompaction({ fromHook: true, details: { localSummaryDetails: {} } }), true);
 assert.equal(
@@ -603,12 +604,23 @@ function installExtension() {
   return handlers;
 }
 
-function createHookContext(sessionId, notices) {
+/**
+ * `widgets` mirrors the durable extension-widget container; `notices` records
+ * ui.notify calls, which the TUI wipes on compaction_end and so must stay empty.
+ */
+function createHookContext(sessionId, notices, widgets) {
   return {
     cwd: repoRoot,
     mode: "tui",
     hasUI: true,
-    ui: { notify: (message, level) => notices.push({ message, level }) },
+    ui: {
+      notify: (message, level) => notices.push({ message, level }),
+      setWidget: (key, content) => {
+        if (content === undefined) widgets.delete(key);
+        else widgets.set(key, content);
+      },
+      theme: { fg: (_color, text) => text },
+    },
     model: compactionModel,
     modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "sk-test" }) },
     sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
@@ -665,13 +677,20 @@ function stubFetch({ remoteCompactionSucceeds }) {
   };
 }
 
+const warningWidgetKey = "openai-server-compaction:continuity-downgrade";
+/** The single line the extension writes into its durable widget, if any. */
+function widgetWarning(widgets) {
+  return widgets.get(warningWidgetKey)?.join("\n");
+}
+
 try {
-  // Retry exhaustion: the warning is withheld during the hook and emitted once
-  // the compaction entry has been committed.
+  // Retry exhaustion: the warning is withheld during the hook and written to the
+  // durable widget once the compaction entry has been committed.
   stubFetch({ remoteCompactionSucceeds: false });
   let handlers = installExtension();
   let notices = [];
-  let ctx = createHookContext("session-warn", notices);
+  let widgets = new Map();
+  let ctx = createHookContext("session-warn", notices, widgets);
 
   const fallbackResult = await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
   assert.equal(fallbackResult.compaction.summary, "LOCAL_TEXT_SUMMARY");
@@ -680,7 +699,7 @@ try {
     undefined,
     "an exhausted retry budget must not claim remote continuity",
   );
-  assert.deepEqual(notices, [], "session_before_compact notifications are swallowed by the TUI re-render");
+  assert.equal(widgetWarning(widgets), undefined, "the warning must wait until the compaction is committed");
 
   const fallbackEntry = {
     type: "compaction",
@@ -690,26 +709,60 @@ try {
     details: fallbackResult.compaction.details,
   };
   handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
-  assert.equal(notices.length, 1, "the warning should surface once the compaction is committed");
-  assert.equal(notices[0].level, "warning");
-  assert.match(notices[0].message, /Opaque continuity was not preserved/);
-  assert.match(notices[0].message, /\[server_error\]/, "the provider failure detail should survive the hook boundary");
+  const warning = widgetWarning(widgets);
+  assert.ok(warning, "the warning should surface once the compaction is committed");
+  assert.match(warning, /^Warning: /);
+  assert.match(warning, /Opaque continuity was not preserved/);
+  assert.match(warning, /\[server_error\]/, "the provider failure detail should survive the hook boundary");
+  assert.deepEqual(
+    notices,
+    [],
+    "the warning must not go through ui.notify, which compaction_end wipes from the chat container",
+  );
+
+  // A committed compaction that still carries opaque continuity must not be
+  // labelled a downgrade even if a warning is pending against it.
+  widgets.clear();
+  await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
+  handlers.get("session_compact")(
+    compactEvent({ ...fallbackEntry, details: { remoteCompaction: { version: 1 } } }),
+    ctx,
+  );
+  assert.equal(widgetWarning(widgets), undefined, "a preserved-continuity entry must not raise the banner");
+
+  // The banner is retracted when a later compaction starts, so a stale downgrade
+  // cannot keep claiming continuity is degraded.
+  await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
+  handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
+  assert.ok(widgetWarning(widgets), "expected the banner after a fresh downgrade");
+  await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
+  assert.equal(widgetWarning(widgets), undefined, "a new compaction must retract the previous banner");
 
   handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
-  assert.equal(notices.length, 1, "a pending warning must be emitted at most once");
+  widgets.clear();
+  handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
+  assert.equal(widgetWarning(widgets), undefined, "a pending warning must be emitted at most once");
 
   // A warning recorded for an abandoned compaction must not leak into a later one.
-  notices.length = 0;
+  widgets.clear();
   await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
   handlers.get("session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
   handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
-  assert.deepEqual(notices, [], "warnings from an abandoned compaction must not resurface");
+  assert.equal(widgetWarning(widgets), undefined, "warnings from an abandoned compaction must not resurface");
+
+  // Switching away from a downgraded session retracts its banner.
+  await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
+  handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
+  assert.ok(widgetWarning(widgets), "expected the banner before the session change");
+  handlers.get("session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
+  assert.equal(widgetWarning(widgets), undefined, "the banner must not follow the user into another session");
 
   // Successful remote compaction stays silent.
   stubFetch({ remoteCompactionSucceeds: true });
   handlers = installExtension();
   notices = [];
-  ctx = createHookContext("session-ok", notices);
+  widgets = new Map();
+  ctx = createHookContext("session-ok", notices, widgets);
 
   const remoteResult = await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
   assert.ok(remoteResult.compaction.details.remoteCompaction, "expected opaque remote continuity");
@@ -723,6 +776,7 @@ try {
     }),
     ctx,
   );
+  assert.equal(widgetWarning(widgets), undefined, "preserved continuity must not warn about a downgrade");
   assert.deepEqual(notices, [], "preserved continuity must not warn about a downgrade");
 } finally {
   globalThis.fetch = originalFetch;
