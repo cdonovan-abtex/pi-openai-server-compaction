@@ -37,14 +37,17 @@ import {
 import {
   clearAllContinuationState,
   clearContinuationState,
+  clearPendingCompactionWarning,
   clearRemoteCompactionState,
   clearResponsesRequestShapeState,
   getContinuationState,
   getRemoteCompactionState,
   getResponsesRequestShapeState,
   setContinuationState,
+  setPendingCompactionWarning,
   setRemoteCompactionState,
   setResponsesRequestShapeState,
+  takePendingCompactionWarning,
 } from "./state.ts";
 
 type TargetModel = Parameters<typeof modelKey>[0];
@@ -96,6 +99,17 @@ function clearSessionRuntimeState(sessionId: string | undefined): void {
   clearLiveContinuation(sessionId);
   clearRemoteCompactionState(sessionId);
   clearResponsesRequestShapeState(sessionId);
+  clearPendingCompactionWarning(sessionId);
+}
+
+/**
+ * True when the committed compaction is the extension's own text-only fallback,
+ * i.e. the entry we wrote carries no opaque `remoteCompaction` continuity.
+ */
+export function isTextOnlyFallbackCompaction(compactionEntry: unknown): boolean {
+  if (!isRecord(compactionEntry) || compactionEntry.fromHook !== true) return false;
+  const details = compactionEntry.details;
+  return !isRecord(details) || details.remoteCompaction === undefined;
 }
 
 function syncRemoteState(ctx: SessionContextLike): void {
@@ -188,7 +202,19 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     syncRemoteState(ctx);
   };
   pi.on("session_tree", syncAfterSessionChange);
-  pi.on("session_compact", syncAfterSessionChange);
+
+  // The compaction is committed by the time this fires, so a notification here
+  // survives the re-render that swallows anything emitted from
+  // `session_before_compact`.
+  pi.on("session_compact", (event, ctx) => {
+    const sessionId = getSessionId(ctx);
+    const pending = takePendingCompactionWarning(sessionId);
+    syncAfterSessionChange(event, ctx);
+
+    if (!pending || !ctx.hasUI) return;
+    if (pending.textOnlyFallback && !isTextOnlyFallbackCompaction(event.compactionEntry)) return;
+    ctx.ui.notify(pending.message, "warning");
+  });
 
   pi.on("model_select", (_event, ctx) => {
     clearLiveContinuation(getSessionId(ctx));
@@ -200,6 +226,11 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
+    const sessionId = getSessionId(ctx);
+    // Drop any warning from an earlier compaction that never reached
+    // `session_compact` so it cannot resurface against this one.
+    clearPendingCompactionWarning(sessionId);
+
     const cfg = loadConfig(ctx.cwd);
     const model = ctx.model;
     if (!cfg.enabled || !model || !supportsRemoteCompactionModel(model)) return undefined;
@@ -208,7 +239,6 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     if (!auth.ok || !auth.apiKey) return undefined;
 
     const tools = buildToolsPayload(pi.getAllTools(), pi.getActiveTools());
-    const sessionId = getSessionId(ctx);
     const branchEntries = event.branchEntries as BranchEntry[];
     const remoteState = getMatchingRemoteState(sessionId, model);
     const observedRequestShape = getResponsesRequestShapeState(sessionId);
@@ -258,16 +288,19 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
       const message =
         remoteResult.reason instanceof Error ? remoteResult.reason.message : String(remoteResult.reason);
       if (localResult.status === "fulfilled") {
-        if (!event.signal.aborted && ctx.hasUI) {
-          ctx.ui.notify(
-            `OpenAI remote compaction failed; saved a text-only fallback. Opaque continuity was not preserved. ${message}`,
-            "warning",
-          );
+        if (!event.signal.aborted) {
+          setPendingCompactionWarning(sessionId, {
+            message: `OpenAI remote compaction failed; saved a text-only fallback. Opaque continuity was not preserved. ${message}`,
+            textOnlyFallback: true,
+          });
         }
         return { compaction: localResult.value };
       }
-      if (!event.signal.aborted && ctx.hasUI) {
-        ctx.ui.notify(`OpenAI remote compaction failed; falling back to default compaction. ${message}`, "warning");
+      if (!event.signal.aborted) {
+        setPendingCompactionWarning(sessionId, {
+          message: `OpenAI remote compaction failed; falling back to default compaction. ${message}`,
+          textOnlyFallback: false,
+        });
       }
       return undefined;
     }

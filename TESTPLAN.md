@@ -34,6 +34,8 @@
 - Inspect the session JSONL and confirm `details.remoteCompaction.replacementHistory` exists.
 - Inject a transient HTTP or streamed `server_error`; confirm bounded exponential-backoff retries and immediate abort behavior.
 - Exhaust the retry budget; confirm Pi warns that it saved only the text fallback and does not claim `details.remoteCompaction`.
+- Confirm that warning renders in the TUI *after* the compaction is committed (it is emitted from `session_compact`, because notifications emitted from `session_before_compact` are discarded by the re-render that follows the commit).
+- Confirm a successful remote compaction produces no downgrade warning, and that the warning is never shown twice or replayed against a later compaction.
 - Continue the session and confirm later compatible turns still behave coherently.
 - Confirm `details.remoteCompaction.implementation` is `responses_compaction_v2`.
 - Confirm replacement history ends with an opaque `compaction` item and retains only the recent user-message budget outside that item.
@@ -72,9 +74,30 @@ PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol node --experimen
 
 The automated live harness lives in `tests/live/openai-compaction-rpc-live.ts`.
 
+### Live retry fault injection
+
+`tests/live/openai-compaction-retry-fault-injection.ts` drives a real `pi` session
+against the real provider through a local pass-through proxy that injects the exact
+streamed nested `server_error` observed in the field on compaction requests only.
+
+```bash
+node --experimental-strip-types ./tests/live/openai-compaction-retry-fault-injection.ts
+PI_OPENAI_SERVER_COMPACTION_SCENARIOS=transient,exhaustion,non-retryable \
+  node --experimental-strip-types ./tests/live/openai-compaction-retry-fault-injection.ts
+```
+
+Scenarios: `transient` (retry preserves the opaque `compaction` artifact and a fact
+deliberately omitted from the text summary is still recoverable after compaction and
+after resume), `exhaustion` (bounded attempts, then a text-only fallback that does not
+claim `details.remoteCompaction`), and `non-retryable` (HTTP 400 fails on attempt 1).
+Set `PI_OPENAI_SERVER_COMPACTION_BASELINE=1` with
+`PI_OPENAI_SERVER_COMPACTION_EXTENSION=<path to a pre-fix src/index.ts>` to record the
+pre-fix behaviour for an A/B comparison instead of asserting the retry contract.
+
 Current automated coverage includes:
 - nested streamed provider-error parsing
 - transient retry success, bounded exhaustion, non-retryable 4xx behavior, `Retry-After`, and abort during backoff
+- retry-exhaustion warning deferral: withheld during `session_before_compact`, emitted once from `session_compact`, suppressed when opaque continuity survived, and dropped when the compaction is abandoned (`npm run smoke`)
 - compaction continuity in the same session
 - `/model`-style switch away and back again
 - fork after compaction

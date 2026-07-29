@@ -24,9 +24,22 @@ export type ResponsesRequestShapeState = {
   text?: ResponsesTextConfig;
 };
 
+/**
+ * A remote-compaction failure recorded during `session_before_compact` so it can
+ * be surfaced after the compaction is committed. Notifications emitted from
+ * inside `session_before_compact` are discarded by the TUI re-render that
+ * follows the commit, so the warning has to survive the hook boundary.
+ */
+export type PendingCompactionWarning = {
+  message: string;
+  /** True when the extension saved its own text-only summary in place of opaque continuity. */
+  textOnlyFallback: boolean;
+};
+
 const continuationBySessionId = new Map<string, ContinuationState>();
 const remoteCompactionBySessionId = new Map<string, RemoteCompactionSessionState>();
 const requestShapeBySessionId = new Map<string, ResponsesRequestShapeState>();
+const pendingCompactionWarningBySessionId = new Map<string, PendingCompactionWarning>();
 
 export function getContinuationState(sessionId: string): ContinuationState | undefined {
   return continuationBySessionId.get(sessionId);
@@ -77,8 +90,30 @@ export function clearResponsesRequestShapeState(sessionId: string | undefined): 
   requestShapeBySessionId.delete(sessionId);
 }
 
+export function setPendingCompactionWarning(
+  sessionId: string,
+  warning: PendingCompactionWarning,
+): void {
+  pendingCompactionWarningBySessionId.set(sessionId, warning);
+}
+
+/** Reads and removes the pending warning so it can never be emitted twice. */
+export function takePendingCompactionWarning(
+  sessionId: string,
+): PendingCompactionWarning | undefined {
+  const warning = pendingCompactionWarningBySessionId.get(sessionId);
+  pendingCompactionWarningBySessionId.delete(sessionId);
+  return warning;
+}
+
+export function clearPendingCompactionWarning(sessionId: string | undefined): void {
+  if (!sessionId) return;
+  pendingCompactionWarningBySessionId.delete(sessionId);
+}
+
 export function clearAllContinuationState(): void {
   continuationBySessionId.clear();
   remoteCompactionBySessionId.clear();
   requestShapeBySessionId.clear();
+  pendingCompactionWarningBySessionId.clear();
 }

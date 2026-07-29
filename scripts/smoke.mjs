@@ -91,7 +91,9 @@ for (const packageName of [
   ensureLocalPeerLink(packageName);
 }
 
-const { default: extensionFactory } = await import(pathToFileURL(join(repoRoot, "src", "index.ts")).href);
+const { default: extensionFactory, isTextOnlyFallbackCompaction } = await import(
+  pathToFileURL(join(repoRoot, "src", "index.ts")).href
+);
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
 
 const {
@@ -562,5 +564,172 @@ assert.deepEqual(incrementalInput, [
     content: "new user",
   },
 ]);
+
+// --- Retry-exhaustion warning is surfaced after the compaction is committed ---
+//
+// Notifications emitted from inside session_before_compact are discarded by the
+// TUI re-render that follows the commit, so the warning has to be deferred to
+// session_compact.
+assert.equal(isTextOnlyFallbackCompaction({ fromHook: true }), true);
+assert.equal(isTextOnlyFallbackCompaction({ fromHook: true, details: { localSummaryDetails: {} } }), true);
+assert.equal(
+  isTextOnlyFallbackCompaction({ fromHook: true, details: { remoteCompaction: { version: 1 } } }),
+  false,
+  "a compaction carrying opaque continuity is not a text-only fallback",
+);
+assert.equal(isTextOnlyFallbackCompaction({ details: {} }), false, "pi-generated compactions are not our fallback");
+
+const compactionModel = {
+  provider: "openai",
+  api: "openai-responses",
+  id: "gpt-5.4-nano",
+  name: "gpt-5.4-nano",
+  baseUrl: "https://api.openai.com/v1",
+  input: ["text"],
+  contextWindow: 400000,
+  maxTokens: 100000,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+};
+
+function installExtension() {
+  const handlers = new Map();
+  extensionFactory({
+    registerProvider: () => {},
+    on: (event, handler) => handlers.set(event, handler),
+    getAllTools: () => [],
+    getActiveTools: () => [],
+    getThinkingLevel: () => undefined,
+  });
+  return handlers;
+}
+
+function createHookContext(sessionId, notices) {
+  return {
+    cwd: repoRoot,
+    mode: "tui",
+    hasUI: true,
+    ui: { notify: (message, level) => notices.push({ message, level }) },
+    model: compactionModel,
+    modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "sk-test" }) },
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
+    getSystemPrompt: () => "system",
+  };
+}
+
+function beforeCompactEvent() {
+  return {
+    type: "session_before_compact",
+    preparation: { firstKeptEntryId: "entry-1", tokensBefore: 1000 },
+    branchEntries: [
+      { type: "message", id: "entry-0", message: { role: "user", content: [{ type: "text", text: "remember me" }] } },
+    ],
+    reason: "manual",
+    willRetry: false,
+    signal: new AbortController().signal,
+  };
+}
+
+function compactEvent(compactionEntry) {
+  return { type: "session_compact", compactionEntry, fromExtension: true, reason: "manual", willRetry: false };
+}
+
+const localSummaryEvents = [
+  {
+    type: "response.output_item.done",
+    item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "LOCAL_TEXT_SUMMARY" }] },
+  },
+  { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+];
+
+const originalFetch = globalThis.fetch;
+const previousCompactionEnv = {
+  PI_OPENAI_SERVER_COMPACTION_ENABLED: process.env.PI_OPENAI_SERVER_COMPACTION_ENABLED,
+  PI_OPENAI_SERVER_COMPACTION_MAX_RETRIES: process.env.PI_OPENAI_SERVER_COMPACTION_MAX_RETRIES,
+  PI_OPENAI_SERVER_COMPACTION_RETRY_BASE_DELAY_MS:
+    process.env.PI_OPENAI_SERVER_COMPACTION_RETRY_BASE_DELAY_MS,
+};
+process.env.PI_OPENAI_SERVER_COMPACTION_ENABLED = "1";
+process.env.PI_OPENAI_SERVER_COMPACTION_MAX_RETRIES = "0";
+process.env.PI_OPENAI_SERVER_COMPACTION_RETRY_BASE_DELAY_MS = "0";
+
+/** Routes remote compaction requests separately from the local summary request. */
+function stubFetch({ remoteCompactionSucceeds }) {
+  globalThis.fetch = async (_url, init) => {
+    const body = typeof init?.body === "string" ? init.body : "";
+    if (!body.includes("compaction_trigger")) {
+      return responseEventStream(localSummaryEvents);
+    }
+    return responseEventStream(
+      remoteCompactionSucceeds ? successfulCompactionEvents : [observedServerError],
+    );
+  };
+}
+
+try {
+  // Retry exhaustion: the warning is withheld during the hook and emitted once
+  // the compaction entry has been committed.
+  stubFetch({ remoteCompactionSucceeds: false });
+  let handlers = installExtension();
+  let notices = [];
+  let ctx = createHookContext("session-warn", notices);
+
+  const fallbackResult = await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
+  assert.equal(fallbackResult.compaction.summary, "LOCAL_TEXT_SUMMARY");
+  assert.equal(
+    fallbackResult.compaction.details?.remoteCompaction,
+    undefined,
+    "an exhausted retry budget must not claim remote continuity",
+  );
+  assert.deepEqual(notices, [], "session_before_compact notifications are swallowed by the TUI re-render");
+
+  const fallbackEntry = {
+    type: "compaction",
+    id: "cmp-fallback",
+    fromHook: true,
+    summary: fallbackResult.compaction.summary,
+    details: fallbackResult.compaction.details,
+  };
+  handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
+  assert.equal(notices.length, 1, "the warning should surface once the compaction is committed");
+  assert.equal(notices[0].level, "warning");
+  assert.match(notices[0].message, /Opaque continuity was not preserved/);
+  assert.match(notices[0].message, /\[server_error\]/, "the provider failure detail should survive the hook boundary");
+
+  handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
+  assert.equal(notices.length, 1, "a pending warning must be emitted at most once");
+
+  // A warning recorded for an abandoned compaction must not leak into a later one.
+  notices.length = 0;
+  await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
+  handlers.get("session_before_switch")({ type: "session_before_switch", reason: "new" }, ctx);
+  handlers.get("session_compact")(compactEvent(fallbackEntry), ctx);
+  assert.deepEqual(notices, [], "warnings from an abandoned compaction must not resurface");
+
+  // Successful remote compaction stays silent.
+  stubFetch({ remoteCompactionSucceeds: true });
+  handlers = installExtension();
+  notices = [];
+  ctx = createHookContext("session-ok", notices);
+
+  const remoteResult = await handlers.get("session_before_compact")(beforeCompactEvent(), ctx);
+  assert.ok(remoteResult.compaction.details.remoteCompaction, "expected opaque remote continuity");
+  handlers.get("session_compact")(
+    compactEvent({
+      type: "compaction",
+      id: "cmp-remote",
+      fromHook: true,
+      summary: remoteResult.compaction.summary,
+      details: remoteResult.compaction.details,
+    }),
+    ctx,
+  );
+  assert.deepEqual(notices, [], "preserved continuity must not warn about a downgrade");
+} finally {
+  globalThis.fetch = originalFetch;
+  for (const [key, value] of Object.entries(previousCompactionEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
 
 console.log("smoke ok");
