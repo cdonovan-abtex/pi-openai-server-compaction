@@ -1031,7 +1031,7 @@ function normalizedBaseDelayMs(value: number | undefined): number {
   return Math.min(MAX_REMOTE_COMPACTION_RETRY_DELAY_MS, Math.max(0, Math.floor(value)));
 }
 
-function sleepForRemoteCompactionRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+export function sleepForRemoteCompactionRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(remoteCompactionAbortError());
@@ -1142,13 +1142,20 @@ export async function callRemoteCompactionEndpoint(params: {
 
       const providerDelayMs =
         error instanceof RemoteCompactionError ? error.retryAfterMs : undefined;
-      const delayMs = providerDelayMs ?? baseDelayMs * 2 ** (attempts - 1);
-      if (delayMs > MAX_REMOTE_COMPACTION_RETRY_DELAY_MS) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (providerDelayMs !== undefined && providerDelayMs > MAX_REMOTE_COMPACTION_RETRY_DELAY_MS) {
         throw new RemoteCompactionError(
-          `OpenAI remote compaction v2 requested a ${Math.ceil(delayMs / 1_000)}s retry delay (maximum ${MAX_REMOTE_COMPACTION_RETRY_DELAY_MS / 1_000}s).`,
-          { cause: error },
+          `${message} (provider requested a ${Math.ceil(providerDelayMs / 1_000)}s retry delay, maximum ${MAX_REMOTE_COMPACTION_RETRY_DELAY_MS / 1_000}s)`,
+          {
+            code: error instanceof RemoteCompactionError ? error.code : undefined,
+            cause: error,
+          },
         );
       }
+      const delayMs = Math.min(
+        providerDelayMs ?? baseDelayMs * 2 ** (attempts - 1),
+        MAX_REMOTE_COMPACTION_RETRY_DELAY_MS,
+      );
       await sleepImpl(delayMs, params.signal);
     }
   }

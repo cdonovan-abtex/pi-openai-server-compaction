@@ -107,6 +107,7 @@ const {
   processCompactedHistory,
   reconstructRemoteCompactionStateFromBranch,
   remoteCompactionV2EndpointUrl,
+  sleepForRemoteCompactionRetry,
 } = await import(pathToFileURL(join(repoRoot, "src", "remote-compaction.ts")).href);
 const {
   selectInputItemsForContinuation,
@@ -354,6 +355,7 @@ await assert.rejects(
 assert.equal(exhaustedAttempts, 3, "retry exhaustion should remain bounded");
 
 let abortedAttempts = 0;
+let abortedBackoffDelayMs;
 const abortController = new AbortController();
 const abortedCompaction = callRemoteCompactionEndpoint({
   ...remoteRequest,
@@ -364,10 +366,57 @@ const abortedCompaction = callRemoteCompactionEndpoint({
     abortedAttempts += 1;
     return responseEventStream([observedServerError]);
   },
+  sleepImpl: (delayMs, signal) => {
+    abortedBackoffDelayMs = delayMs;
+    const sleeping = sleepForRemoteCompactionRetry(delayMs, signal);
+    abortController.abort();
+    return sleeping;
+  },
 });
-queueMicrotask(() => abortController.abort());
 await assert.rejects(abortedCompaction, /aborted/i);
+assert.equal(abortedBackoffDelayMs, 10_000, "abort coverage should run inside the real backoff sleep");
 assert.equal(abortedAttempts, 1, "abort during retry backoff should prevent another request");
+
+let cappedBackoffAttempts = 0;
+const cappedBackoffDelays = [];
+await callRemoteCompactionEndpoint({
+  ...remoteRequest,
+  maxRetries: 2,
+  retryBaseDelayMs: 60_000,
+  fetchImpl: async () => {
+    cappedBackoffAttempts += 1;
+    return cappedBackoffAttempts < 3
+      ? responseEventStream([observedServerError])
+      : responseEventStream(successfulCompactionEvents);
+  },
+  sleepImpl: async (delayMs) => {
+    cappedBackoffDelays.push(delayMs);
+  },
+});
+assert.deepEqual(cappedBackoffDelays, [60_000, 60_000], "local exponential backoff should clamp to the ceiling");
+assert.equal(cappedBackoffAttempts, 3, "clamped local backoff should not end retries early");
+
+await assert.rejects(
+  callRemoteCompactionEndpoint({
+    ...remoteRequest,
+    maxRetries: 2,
+    retryBaseDelayMs: 1,
+    fetchImpl: async () =>
+      new Response("upstream is saturated", {
+        status: 503,
+        headers: { "retry-after": "3600" },
+      }),
+    sleepImpl: async () => {
+      throw new Error("excessive provider retry-after must not sleep");
+    },
+  }),
+  (error) => {
+    assert.match(error.message, /failed \(503\): upstream is saturated/);
+    assert.match(error.message, /provider requested a 3600s retry delay, maximum 60s/);
+    assert.match(error.cause?.message ?? "", /failed \(503\): upstream is saturated/);
+    return true;
+  },
+);
 
 let retryAfterAttempts = 0;
 const retryAfterDelays = [];
