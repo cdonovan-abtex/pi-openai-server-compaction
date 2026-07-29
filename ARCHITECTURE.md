@@ -50,9 +50,11 @@ In practice, that means keeping two representations of context alive at once:
    - generate a **portable local summary**
    - request Responses compaction v2
 4. `src/remote-compaction.ts` converts Pi messages to OpenAI Responses `input` items, appends a `compaction_trigger`, and streams the compaction response from the normal Responses endpoint.
-5. If remote compaction succeeds, the returned opaque replacement history is stored in:
+5. Transient remote failures (streamed or HTTP `server_error`, overload, rate limiting, transport errors) are retried there with bounded exponential backoff that honors `Retry-After` and aborts with the compaction signal. Deterministic 4xx and quota errors fail on the first attempt.
+6. If remote compaction succeeds, the returned opaque replacement history is stored in:
    - `CompactionEntry.details.remoteCompaction`
-6. Pi still keeps a text summary so the session remains understandable and portable.
+7. Pi still keeps a text summary so the session remains understandable and portable.
+8. If remote compaction fails after retries, the text summary is committed alone and `src/index.ts` raises a continuity-downgrade banner once the compaction is committed, so the fidelity loss is never silent.
 
 ### Post-compaction continuation
 
@@ -80,6 +82,7 @@ Runtime-only state lives in memory and is rebuilt when needed:
 
 - latest safe `responseId` for incremental continuation
 - reconstructed remote compaction replay state for the active session
+- a pending continuity-downgrade warning for the in-flight compaction
 - active WebSocket session manager(s)
 
 This state is managed by:
@@ -99,6 +102,7 @@ Responsibilities:
 - patch outgoing provider payloads
 - hook into Pi compaction lifecycle
 - merge local and remote compaction results
+- surface a continuity-downgrade banner when only the text fallback was saved
 - reconstruct remote state on session start/tree/compaction
 - clear ephemeral state on switch/fork/tree/model/shutdown
 
@@ -112,6 +116,7 @@ Responsibilities:
 - convert Pi messages to OpenAI Responses-style input items
 - call `POST /v1/responses` with a trailing `compaction_trigger`
 - parse the Responses SSE stream and validate the returned `compaction` item
+- classify provider errors as transient or deterministic, and retry transient ones with bounded, abort-aware backoff
 - retain recent user messages using Codex's 20K-token budget shape
 - build portable text summaries
 - rebuild replayable remote state from persisted compaction entries
@@ -183,6 +188,7 @@ Important safety rules:
 - reconstructed remote history only replays post-compaction turns whose assistant completions match the compaction model, avoiding cross-model pollution after resume/tree reload
 - live `previous_response_id` state is cleared on key session/model lifecycle boundaries
 - HTTP fallback remains available if the WS path is unavailable or unsafe
+- a text-only fallback compaction is never silent: losing the opaque artifact is reported to the user as an explicit continuity downgrade
 
 ## Why both local summary and remote compaction exist
 
@@ -221,6 +227,10 @@ This is a black-box integration test that drives real `pi --mode rpc` sessions a
 - model switch away and back
 - fork after compaction
 - resume/reload after compaction
+
+A second live harness, `tests/live/openai-compaction-retry-fault-injection.ts`, proxies
+the real provider to inject compaction failures and validate the retry/fallback
+contract. See `TESTPLAN.md` for its scenarios and invocation.
 
 ### Controlled native-vs-text benchmark
 

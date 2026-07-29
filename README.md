@@ -111,7 +111,7 @@ The extension clears live continuation state on: session start/reload/resume, sw
 
 Remote compaction history is only replayed for compatible models. Cross-model turns are filtered from reconstructed replay history to prevent contamination after resume or tree navigation.
 
-Transient remote-compaction failures are retried up to three times after the initial request with abort-aware exponential backoff. Deterministic failures such as invalid requests and quota exhaustion fail immediately. If all retries fail but the portable summary succeeds, Pi saves the text-only summary and displays a warning that opaque continuity was not preserved.
+Transient remote-compaction failures are retried up to three times after the initial request with abort-aware exponential backoff. A provider `Retry-After` header is honored; computed backoff is capped at 60 seconds, and a provider-requested delay longer than that gives up instead of waiting. Deterministic failures such as invalid requests and quota exhaustion fail immediately. If all retries fail but the portable summary succeeds, Pi saves the text-only summary and shows a persistent warning banner that opaque continuity was not preserved.
 
 ## Data handling
 
@@ -152,7 +152,7 @@ Environment overrides:
 | `PI_OPENAI_SERVER_COMPACTION_RATIO`                | Compact threshold as ratio of context window (default: 0.7) |
 | `PI_OPENAI_SERVER_COMPACTION_PREVIOUS_RESPONSE_ID` | Enable/disable `previous_response_id`                       |
 | `PI_OPENAI_SERVER_COMPACTION_MAX_RETRIES`          | Retries after the initial remote request (default: 3; max: 10) |
-| `PI_OPENAI_SERVER_COMPACTION_RETRY_BASE_DELAY_MS`  | Initial retry delay in milliseconds (default: 1000; doubles each retry) |
+| `PI_OPENAI_SERVER_COMPACTION_RETRY_BASE_DELAY_MS`  | Initial retry delay in milliseconds (default: 1000; doubles each retry, capped at 60000) |
 | `PI_OPENAI_SERVER_COMPACTION_NOTIFY`               | Show UI notifications when features activate                |
 
 ## Troubleshooting
@@ -207,6 +207,7 @@ PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol npm run test:liv
 | `src/state.ts`                             | Ephemeral per-session runtime state                               |
 | `src/stream-message-shared.ts`             | Shared assistant message builders                                 |
 | `tests/live/openai-compaction-rpc-live.ts` | Live Pi RPC regression test                                       |
+| `tests/live/openai-compaction-retry-fault-injection.ts` | Live retry/fallback fault-injection test                     |
 | `scripts/smoke.mjs`                        | Offline smoke test with peer-package bootstrapping                |
 | `benchmarks/product-defaults/`             | Current default-vs-default benchmark, retained evidence, and report |
 | `benchmarks/native-vs-text/`               | Earlier matched-cap benchmark, retained with a correction          |

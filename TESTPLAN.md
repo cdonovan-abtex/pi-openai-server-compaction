@@ -34,7 +34,7 @@
 - Inspect the session JSONL and confirm `details.remoteCompaction.replacementHistory` exists.
 - Inject a transient HTTP or streamed `server_error`; confirm bounded exponential-backoff retries and immediate abort behavior.
 - Exhaust the retry budget; confirm Pi warns that it saved only the text fallback and does not claim `details.remoteCompaction`.
-- Confirm that warning renders in the TUI *after* the compaction is committed (it is emitted from `session_compact`, because notifications emitted from `session_before_compact` are discarded by the re-render that follows the commit).
+- Confirm that warning renders in the TUI *after* the compaction is committed and survives the post-compaction re-render (see the widget-key comment in `src/index.ts` for why it is a durable widget rather than a notification).
 - Confirm a successful remote compaction produces no downgrade warning, and that the warning is never shown twice or replayed against a later compaction.
 - Continue the session and confirm later compatible turns still behave coherently.
 - Confirm `details.remoteCompaction.implementation` is `responses_compaction_v2`.
@@ -97,7 +97,7 @@ pre-fix behaviour for an A/B comparison instead of asserting the retry contract.
 Current automated coverage includes:
 - nested streamed provider-error parsing
 - transient retry success, bounded exhaustion, non-retryable 4xx behavior, `Retry-After`, and abort during backoff
-- retry-exhaustion warning: withheld during `session_before_compact`, then written once from `session_compact` to a durable extension widget rather than `ui.notify` — Pi's `compaction_end` handler clears and rebuilds the chat container, which destroys any notification a compaction hook emits. Also covered: suppressed when opaque continuity survived, retracted by the next compaction and by a session change, and dropped when the compaction is abandoned (`npm run smoke`)
+- retry-exhaustion warning: withheld during `session_before_compact`, then written once from `session_compact` to a durable extension widget rather than `ui.notify` (rationale in the widget-key comment in `src/index.ts`). Also covered: suppressed when opaque continuity survived, retracted by the next compaction and by a session change, and dropped when the compaction is abandoned (`npm run smoke`)
 - compaction continuity in the same session
 - `/model`-style switch away and back again
 - fork after compaction

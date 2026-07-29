@@ -129,3 +129,4 @@ After the first successful live pass, an additional cleanup/hardening pass was a
 - local portable-summary generation now falls back to Pi's built-in compaction helper if the full-branch summary attempt fails
 - remote compaction output is now shape-checked before being persisted or reconstructed from session details
 - the WebSocket connection manager now handles reconnect scheduling and pre-open close/error cases more defensively
+- transient remote-compaction failures (including the streamed nested `server_error` observed in the field) are now retried with bounded, abort-aware backoff instead of immediately dropping to the text-only fallback, and an unavoidable text-only fallback is surfaced to the user as an explicit continuity downgrade rather than saved silently
