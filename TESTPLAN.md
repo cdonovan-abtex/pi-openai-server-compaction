@@ -82,5 +82,5 @@ Recommended follow-up live regression:
 
 ## Controlled compaction benchmark
 
-The native-vs-text benchmark, reproduction instructions, retained evidence, and report live under:
-- `benchmarks/native-vs-text/`
+Current benchmark test-plan guidance and retained evidence are owned by the
+[product-defaults benchmark](benchmarks/product-defaults/README.md).

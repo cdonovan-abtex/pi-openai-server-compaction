@@ -1,5 +1,8 @@
 # Benchmark: Pi default compaction vs. extension-native compaction
 
+This directory is the current owner of benchmark product-default assumptions,
+architecture, and test-plan guidance.
+
 This benchmark compares the two product policies without forcing either representation
 to match the other's output-token count:
 

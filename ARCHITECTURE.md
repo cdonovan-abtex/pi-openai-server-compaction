@@ -222,10 +222,10 @@ This is a black-box integration test that drives real `pi --mode rpc` sessions a
 - fork after compaction
 - resume/reload after compaction
 
-### Controlled native-vs-text benchmark
+### Controlled product-default benchmark
 
-The reproducible benchmark, retained evidence, and standalone report live under:
-- `benchmarks/native-vs-text/`
+Current benchmark assumptions, architecture, and guidance are owned by the
+[product-defaults benchmark](benchmarks/product-defaults/README.md).
 
 ## Suggested reading order
 
