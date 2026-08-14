@@ -29,9 +29,11 @@ text summaries at apparently matched downstream sizes. That procedure first
 observed native's output usage and then imposed it as the text arm's maximum,
 which is asymmetric and can favor native. Its same-budget interpretation is
 therefore superseded. See the new [product-defaults report](benchmarks/product-defaults/REPORT.md)
-and [reproduction instructions](benchmarks/product-defaults/README.md). The
-[older matched-cap report](benchmarks/native-vs-text/REPORT.md) remains retained
-with a methodological correction.
+and [reproduction instructions](benchmarks/product-defaults/README.md), which
+carry that correction. The [older matched-cap benchmark](benchmarks/native-vs-text/README.md)
+is retained as historical evidence only: its documentation is now a pointer to
+the current report, and its figures survive only in its retained machine
+records.
 
 None of this proves the encrypted blobs use a clever latent-space
 representation. They might be encrypted optimized text or structured state
@@ -202,7 +204,7 @@ PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol npm run test:liv
 | `tests/live/openai-compaction-rpc-live.ts` | Live Pi RPC regression test                                       |
 | `scripts/smoke.mjs`                        | Offline smoke test with peer-package bootstrapping                |
 | `benchmarks/product-defaults/`             | Current default-vs-default benchmark, retained evidence, and report |
-| `benchmarks/native-vs-text/`               | Earlier matched-cap benchmark, retained with a correction          |
+| `benchmarks/native-vs-text/`               | Earlier matched-cap benchmark, superseded; retained evidence only  |
 | `ARCHITECTURE.md`                          | Design and control-flow documentation                             |
 | `TESTPLAN.md`                              | Manual and automated test plan                                    |
 | `CHANGELOG.md`                             | Version history                                                   |

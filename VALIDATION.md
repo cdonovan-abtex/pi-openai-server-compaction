@@ -40,10 +40,13 @@ The earlier native-vs-text run set each text summary's maximum output tokens
 after observing its paired native request's output usage. That creates a
 one-sided, post-treatment cap and is not a symmetric matched-budget comparison.
 Its raw results remain reproducible, but its same-budget interpretation is
-superseded by the methodological note in:
+superseded by the "Why this follow-up was needed" section in:
 
-- `benchmarks/native-vs-text/REPORT.md`
-- `benchmarks/native-vs-text/README.md`
+- `benchmarks/product-defaults/REPORT.md`
+
+The earlier benchmark's own documentation is now a superseded pointer to that
+report; its retained machine records remain under
+`benchmarks/native-vs-text/final-results/`.
 
 ## Legacy `/responses/compact` validation
 

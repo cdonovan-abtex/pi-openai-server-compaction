@@ -82,5 +82,6 @@ Recommended follow-up live regression:
 
 ## Controlled compaction benchmark
 
-Current benchmark test-plan guidance and retained evidence are owned by the
-[product-defaults benchmark](benchmarks/product-defaults/README.md).
+Current benchmark test-plan guidance and the current reference run are owned by the
+[product-defaults benchmark](benchmarks/product-defaults/README.md). The superseded
+`benchmarks/native-vs-text/` run is retained as historical evidence only.
