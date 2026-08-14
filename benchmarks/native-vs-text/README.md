@@ -14,6 +14,11 @@ containing `manifest.json` (run dimensions and budget rule), `fixtures.json`
 `GENERATED_RESULTS.md`. Encrypted native contents were never written to disk;
 trials record only each artifact's SHA-256 and byte length.
 
+`GENERATED_RESULTS.md` defers interpretation to this benchmark's standalone
+[REPORT.md](REPORT.md), which is now a superseded stub; the current
+interpretation and limitations live in the
+[product-defaults report](../product-defaults/REPORT.md).
+
 The `fixtures.ts`, `run.ts`, `run-dense-text-variant.ts`, `analyze.ts`, and
 `self-test.ts` scripts remain only to reproduce that historical run. They are
 not the current benchmark harness; use the product-defaults benchmark instead.
