@@ -358,6 +358,15 @@ function buildPortableSummaryPrompt(conversation: string, customInstructions?: s
 export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
   const items: ResponseItem[] = [];
 
+  // Pi custom messages participate in LLM context as user messages. Delegate
+  // that semantic conversion to Pi instead of giving custom entries a separate
+  // provider vocabulary.
+  if (message.role === "custom") {
+    return convertToLlm([message]).flatMap((converted) => (
+      converted.role === "user" ? messageToResponseItems(converted) : []
+    ));
+  }
+
   if (message.role === "user") {
     const content = contentToResponseContentItems(message.content);
     if (content.length > 0) {
@@ -1027,8 +1036,35 @@ function assistantMessageMatchesModelKey(
   return message.provider === target.provider && message.model === target.id;
 }
 
+type RemoteCompactionBranchEntry = {
+  type: string;
+  id: string;
+  details?: unknown;
+  message?: AgentMessage;
+  customType?: unknown;
+  content?: unknown;
+  display?: unknown;
+  timestamp?: unknown;
+};
+
+function branchEntryToMessage(entry: RemoteCompactionBranchEntry): AgentMessage | undefined {
+  if (entry.type === "message" && entry.message) return entry.message;
+  if (entry.type !== "custom_message" || typeof entry.customType !== "string") return undefined;
+
+  const content = typeof entry.content === "string" || Array.isArray(entry.content) ? entry.content : [];
+  const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : new Date(0).toISOString();
+  return {
+    role: "custom",
+    customType: entry.customType,
+    content: content as Extract<AgentMessage, { role: "custom" }>["content"],
+    display: entry.display === true,
+    details: entry.details,
+    timestamp: new Date(timestamp).getTime(),
+  } as Extract<AgentMessage, { role: "custom" }>;
+}
+
 export function reconstructRemoteCompactionStateFromBranch(params: {
-  branchEntries: Array<{ type: string; id: string; details?: unknown; message?: AgentMessage }>;
+  branchEntries: RemoteCompactionBranchEntry[];
 }): RemoteCompactionSessionState | undefined {
   let latestCompactionIndex = -1;
   let latestCompactionEntryId = "";
@@ -1047,13 +1083,14 @@ export function reconstructRemoteCompactionStateFromBranch(params: {
   let pendingTurnItems: ResponseItem[] = [];
 
   for (const entry of params.branchEntries.slice(latestCompactionIndex + 1)) {
-    if (entry.type !== "message" || !entry.message) continue;
+    const message = branchEntryToMessage(entry);
+    if (!message) continue;
 
-    const items = messageToResponseItems(entry.message);
+    const items = messageToResponseItems(message);
     if (items.length === 0) continue;
 
-    if (entry.message.role === "assistant") {
-      if (assistantMessageMatchesModelKey(entry.message, latestDetails.modelKey)) {
+    if (message.role === "assistant") {
+      if (assistantMessageMatchesModelKey(message, latestDetails.modelKey)) {
         trailingMessages.push(...pendingTurnItems, ...items);
       }
       pendingTurnItems = [];
@@ -1062,6 +1099,11 @@ export function reconstructRemoteCompactionStateFromBranch(params: {
 
     pendingTurnItems.push(...items);
   }
+
+  // A resumed session may contain a request that was persisted before its
+  // assistant response. Preserve that pending request for the next provider
+  // call, matching Pi's normal context reconstruction.
+  trailingMessages.push(...pendingTurnItems);
 
   return {
     compactionEntryId: latestCompactionEntryId,

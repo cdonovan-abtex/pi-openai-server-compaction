@@ -101,6 +101,7 @@ const {
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
   extractRemoteCompactionDetails,
+  messageToResponseItems,
   normalizeResponseItemsForPrompt,
   parseRemoteCompactionV2Events,
   processCompactedHistory,
@@ -198,6 +199,86 @@ assert.match(reconstructedJson, /KEEP_ME_TWO/);
 assert.match(reconstructedJson, /KEEP_REPLY_TWO/);
 assert.doesNotMatch(reconstructedJson, /DROP_ME/);
 assert.doesNotMatch(reconstructedJson, /DROP_REPLY/);
+
+const syntheticActionAcknowledgement = "SYNTHETIC_ACTION_ACKNOWLEDGED";
+const customRequest = {
+  role: "custom",
+  customType: "synthetic-action",
+  display: false,
+  timestamp: 1,
+  content: [
+    { type: "text", text: "CUSTOM_ACTION_REQUIRED" },
+    { type: "image", data: "AAAA", mimeType: "image/png" },
+  ],
+};
+const equivalentUserRequest = {
+  role: "user",
+  timestamp: 1,
+  content: customRequest.content,
+};
+assert.deepEqual(
+  messageToResponseItems(customRequest),
+  messageToResponseItems(equivalentUserRequest),
+  "custom messages must use Pi's normal user-message conversion semantics",
+);
+assert.deepEqual(messageToResponseItems({
+  role: "assistant",
+  provider: "openai-codex",
+  api: "openai-codex-responses",
+  model: "gpt-5.6-terra",
+  timestamp: 2,
+  content: [
+    { type: "text", text: "assistant control" },
+    { type: "toolCall", id: "call-control", name: "synthetic_action", arguments: { step: 1 } },
+  ],
+}), [
+  { type: "message", role: "assistant", content: [{ type: "output_text", text: "assistant control" }] },
+  { type: "function_call", call_id: "call-control", name: "synthetic_action", arguments: '{"step":1}' },
+]);
+assert.deepEqual(messageToResponseItems({
+  role: "toolResult",
+  toolCallId: "call-control",
+  toolName: "synthetic_action",
+  isError: false,
+  timestamp: 3,
+  content: [{ type: "text", text: syntheticActionAcknowledgement }],
+}), [{
+  type: "function_call_output",
+  call_id: "call-control",
+  output: [{ type: "input_text", text: syntheticActionAcknowledgement }],
+}]);
+
+const persistedCustom = reconstructRemoteCompactionStateFromBranch({
+  branchEntries: [
+    {
+      type: "compaction",
+      id: "cmp-custom",
+      details: {
+        remoteCompaction: {
+          version: 2,
+          provider: "openai-responses-compaction",
+          modelKey: "openai-codex:openai-codex-responses:gpt-5.6-terra",
+          replacementHistory: [{ type: "compaction", encrypted_content: "ENCRYPTED" }],
+        },
+      },
+    },
+    {
+      type: "custom_message",
+      id: "persisted-custom",
+      customType: "synthetic-action",
+      content: customRequest.content,
+      display: false,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    },
+  ],
+});
+assert.ok(persistedCustom, "expected persisted custom message to reconstruct remote state");
+const persistedCustomItems = persistedCustom.explicitHistory.filter((item) => item.type === "message");
+assert.equal(persistedCustomItems.length, 1, "persisted custom request must not be duplicated");
+assert.deepEqual(persistedCustomItems[0].content, [
+  { type: "input_text", text: "CUSTOM_ACTION_REQUIRED" },
+  { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+]);
 
 const requestBody = buildRemoteCompactionRequestBody({
   model: {
@@ -369,5 +450,101 @@ assert.deepEqual(incrementalInput, [
     content: "new user",
   },
 ]);
+
+const { loadExtensions } = await import(pathToFileURL(join(
+  localNodeModules,
+  "@earendil-works",
+  "pi-coding-agent",
+  "dist",
+  "core",
+  "extensions",
+  "loader.js",
+)).href);
+const { extensions, errors } = await loadExtensions([join(repoRoot, "src", "index.ts")], repoRoot);
+assert.deepEqual(errors, [], "extension should load through Pi's supported extension loader");
+const extension = extensions[0];
+const hookModel = {
+  provider: "openai-codex",
+  api: "openai-codex-responses",
+  id: "gpt-5.6-terra",
+  input: ["text", "image"],
+};
+let hookBranch = [{
+  type: "compaction",
+  id: "hook-compaction",
+  details: {
+    remoteCompaction: {
+      version: 2,
+      provider: "openai-responses-compaction",
+      modelKey: "openai-codex:openai-codex-responses:gpt-5.6-terra",
+      replacementHistory: [{ type: "compaction", encrypted_content: "ENCRYPTED" }],
+    },
+  },
+}];
+const hookContext = {
+  cwd: repoRoot,
+  model: hookModel,
+  hasUI: false,
+  ui: { setWidget() {}, notify() {}, theme: { fg: (_color, text) => text } },
+  sessionManager: { getSessionId: () => "smoke-custom-hook", getBranch: () => hookBranch },
+};
+async function emitHook(type, event = {}) {
+  let result;
+  for (const handler of extension.handlers.get(type) ?? []) {
+    const next = await handler({ type, ...event }, hookContext);
+    if (next !== undefined) result = next;
+  }
+  return result;
+}
+const liveCustom = { ...customRequest, timestamp: 4 };
+const normalLiveCustom = (await import(pathToFileURL(join(
+  localNodeModules,
+  "@earendil-works",
+  "pi-coding-agent",
+  "dist",
+  "core",
+  "messages.js",
+)).href)).convertToLlm([liveCustom])[0];
+assert.equal(normalLiveCustom.role, "user");
+const originalPayload = {
+  model: hookModel.id,
+  instructions: "preserve instructions",
+  tools: [{ type: "function", name: "synthetic_action" }],
+  input: [{
+    type: "message",
+    role: normalLiveCustom.role,
+    content: [
+      { type: "input_text", text: "CUSTOM_ACTION_REQUIRED" },
+      { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+    ],
+  }],
+};
+await emitHook("session_start");
+await emitHook("message_end", { message: liveCustom });
+const patchedPayload = await emitHook("before_provider_request", { payload: originalPayload });
+assert.equal(patchedPayload.instructions, originalPayload.instructions, "request instructions must remain unchanged");
+assert.deepEqual(patchedPayload.tools, originalPayload.tools, "request tools must remain unchanged");
+const liveCustomItems = patchedPayload.input.filter((item) => item.type === "message" && item.role === "user");
+assert.equal(liveCustomItems.length, 1, "live custom request must be present exactly once after compaction");
+assert.deepEqual(liveCustomItems[0].content, [
+  { type: "input_text", text: "CUSTOM_ACTION_REQUIRED" },
+  { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+]);
+hookBranch = [{
+  ...hookBranch[0],
+}, {
+  type: "custom_message",
+  id: "hook-persisted-custom",
+  customType: "synthetic-action",
+  content: liveCustom.content,
+  display: false,
+  timestamp: "2026-01-01T00:00:00.000Z",
+}];
+await emitHook("session_start");
+const resumedPayload = await emitHook("before_provider_request", { payload: originalPayload });
+const resumedCustomItems = resumedPayload.input.filter((item) => item.type === "message" && item.role === "user");
+assert.equal(resumedCustomItems.length, 1, "resumed custom request must be present exactly once after compaction");
+assert.deepEqual(resumedCustomItems[0].content, liveCustomItems[0].content);
+await emitHook("session_shutdown");
 
 console.log("smoke ok");
