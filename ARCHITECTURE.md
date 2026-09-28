@@ -138,8 +138,8 @@ Responsibilities:
 Provider streams receive `TranscriptContext`. The current instructions and tool
 declarations come from `getCurrentSystemPrompt(context.messages)` and
 `getCurrentTools(context.messages)`, including for optional WebSocket warm-up.
-Both declarations participate in the WebSocket request key, so changing or
-clearing either prevents reuse of the previous request's `previous_response_id`.
+Both declarations participate in the WebSocket request key used by the stream's
+incremental-continuation check, before the `onPayload` hook runs.
 HTTP fallback passes the transcript to Pi's provider stream unchanged.
 
 ### `src/openai-ws-connection.ts`
