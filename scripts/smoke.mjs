@@ -89,6 +89,8 @@ for (const packageName of [
   "@earendil-works/pi-ai",
 ]) {
   ensureLocalPeerLink(packageName);
+  const packageJson = JSON.parse(readFileSync(join(localNodeModules, ...packagePathSegments(packageName), "package.json"), "utf8"));
+  assert.equal(packageJson.version, "0.87.1", `${packageName} must match the tested Pi version`);
 }
 
 const { default: extensionFactory, isTextOnlyFallbackCompaction } = await import(
@@ -97,8 +99,6 @@ const { default: extensionFactory, isTextOnlyFallbackCompaction } = await import
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
 
 const {
-  buildCodexWebSocketHeaders,
-  buildRemoteCompactionHeaders,
   buildRemoteCompactionDetails,
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
@@ -489,29 +489,6 @@ assert.deepEqual(compactedHistory.map((item) => item.type), ["message", "message
 assert.equal(compactedHistory[0].role, "user");
 assert.equal(compactedHistory[1].role, "assistant");
 
-const compactionHeaders = buildRemoteCompactionHeaders({
-  model: {
-    provider: "openai",
-    api: "openai-responses",
-    id: "gpt-5.4-nano",
-  },
-  apiKey: "sk-test",
-  sessionId: "session-123",
-  headers: { "x-extra": "yes" },
-});
-assert.equal(compactionHeaders.authorization, "Bearer sk-test");
-assert.equal(compactionHeaders.session_id, "session-123");
-assert.equal(compactionHeaders["x-codex-window-id"], "session-123:0");
-assert.match(compactionHeaders["x-codex-installation-id"], /^[0-9a-f-]{36}$/);
-assert.equal(compactionHeaders["x-extra"], "yes");
-assert.equal(compactionHeaders["x-codex-beta-features"], "remote_compaction_v2");
-assert.equal(compactionHeaders.accept, "text/event-stream");
-
-const websocketHeaders = buildCodexWebSocketHeaders("session-123");
-assert.equal(websocketHeaders["x-client-request-id"], "session-123");
-assert.equal(websocketHeaders.session_id, "session-123");
-assert.equal(websocketHeaders["x-codex-window-id"], "session-123:0");
-
 const detailsRoundTrip = extractRemoteCompactionDetails({
   remoteCompaction: buildRemoteCompactionDetails(
     {
@@ -785,5 +762,7 @@ try {
     else process.env[key] = value;
   }
 }
+
+await import("./smoke-provider-api.mjs");
 
 console.log("smoke ok");

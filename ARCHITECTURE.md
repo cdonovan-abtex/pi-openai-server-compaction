@@ -50,11 +50,11 @@ In practice, that means keeping two representations of context alive at once:
    - generate a **portable local summary**
    - request Responses compaction v2
 4. `src/remote-compaction.ts` converts Pi messages to OpenAI Responses `input` items, appends a `compaction_trigger`, and streams the compaction response from the normal Responses endpoint.
-5. Transient remote failures (streamed or HTTP `server_error`, overload, rate limiting, transport errors) are retried there with bounded exponential backoff that honors `Retry-After` and aborts with the compaction signal. Deterministic 4xx and quota errors fail on the first attempt.
+5. `src/remote-compaction.ts` applies the [retry policy](README.md#safety).
 6. If remote compaction succeeds, the returned opaque replacement history is stored in:
    - `CompactionEntry.details.remoteCompaction`
 7. Pi still keeps a text summary so the session remains understandable and portable.
-8. If remote compaction fails after retries, the text summary is committed alone and `src/index.ts` raises a continuity-downgrade banner once the compaction is committed, so the fidelity loss is never silent.
+8. If remote compaction fails but the local summary succeeds, the text summary is committed alone. In interactive sessions, `src/index.ts` raises the [fallback warning](README.md#safety) from `session_compact`, after checking the committed entry.
 
 ### Post-compaction continuation
 
@@ -123,6 +123,12 @@ Responsibilities:
 
 This file is the core of the actual compaction-boundary behavior.
 
+Remote compaction applies Pi's provider header overrides case-insensitively:
+string values replace defaults and `null` removes them. The
+`x-codex-beta-features` value includes `remote_compaction_v2` unless that header
+is explicitly suppressed with `null`. Portable-summary generation and Pi's
+fallback compactor receive the overrides unchanged, including `null` values.
+
 ### `src/openai-ws-stream.ts`
 
 The custom stream implementation.
@@ -134,6 +140,13 @@ Responsibilities:
 - replay remote compaction history when available
 - translate OpenAI WS events into Pi assistant stream events/messages
 - compute usage/cost information for the WS path
+
+Provider streams receive `TranscriptContext`. The current instructions and tool
+declarations come from `getCurrentSystemPrompt(context.messages)` and
+`getCurrentTools(context.messages)`, including for optional WebSocket warm-up.
+Both declarations participate in the WebSocket request key used by the stream's
+incremental-continuation check, before the `onPayload` hook runs.
+HTTP fallback passes the transcript to Pi's provider stream unchanged.
 
 ### `src/openai-ws-connection.ts`
 
@@ -188,7 +201,7 @@ Important safety rules:
 - reconstructed remote history only replays post-compaction turns whose assistant completions match the compaction model, avoiding cross-model pollution after resume/tree reload
 - live `previous_response_id` state is cleared on key session/model lifecycle boundaries
 - HTTP fallback remains available if the WS path is unavailable or unsafe
-- a text-only fallback compaction is never silent: losing the opaque artifact is reported to the user as an explicit continuity downgrade
+- interactive text-only fallback warnings follow the [fallback policy](README.md#safety)
 
 ## Why both local summary and remote compaction exist
 
@@ -212,7 +225,8 @@ So the package is intentionally hybrid:
 
 - `npm run smoke`
 
-Verifies imports/loadability.
+Coverage and dependency requirements are documented in the
+[offline smoke test plan](TESTPLAN.md#offline-smoke-test).
 
 ### Live end-to-end test
 

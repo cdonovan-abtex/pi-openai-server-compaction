@@ -1,8 +1,8 @@
 # Validation
 
-## Current Responses compaction v2 validation
+## Recorded Responses compaction v2 validation
 
-The full live Pi RPC suite passes with both:
+Before the transcript-based provider-stream port, the full live Pi RPC suite passed with both:
 
 - `openai/gpt-5.6-luna` through the direct OpenAI Responses API
 - `openai-codex/gpt-5.6-sol` through the ChatGPT Codex subscription backend
@@ -129,4 +129,4 @@ After the first successful live pass, an additional cleanup/hardening pass was a
 - local portable-summary generation now falls back to Pi's built-in compaction helper if the full-branch summary attempt fails
 - remote compaction output is now shape-checked before being persisted or reconstructed from session details
 - the WebSocket connection manager now handles reconnect scheduling and pre-open close/error cases more defensively
-- transient remote-compaction failures (including the streamed nested `server_error` observed in the field) are now retried with bounded, abort-aware backoff instead of immediately dropping to the text-only fallback, and an unavoidable text-only fallback is surfaced to the user as an explicit continuity downgrade rather than saved silently
+- remote-compaction retry and text-only fallback behavior is documented in [Safety](README.md#safety)

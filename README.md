@@ -39,16 +39,16 @@ values. (A little reverse engineering suggests the blobs are produced through
 a textual prompt, for what it is worth:
 https://x.com/alexisgallagher/status/2042396986327060736?s=20 .)
 
-> **Status:** experimental but live-tested against real Pi + real OpenAI backends.
+> **Status:** experimental. See [recorded validation](VALIDATION.md#recorded-responses-compaction-v2-validation) for live backend evidence and its version context.
 > Recommended rollout: install project-local first, use for a week, keep rollback easy.
 
 ## Support matrix
 
-| Provider/model family | Remote compaction           | `previous_response_id` continuity | Custom WS stream                 | Live-tested |
-|-----------------------|-----------------------------|-----------------------------------|----------------------------------|-------------|
-| `openai/*`            | Yes                         | Yes                               | Yes                              | Yes         |
-| `openai-codex/*`      | Yes                         | No (built-in transport retained)  | No (built-in transport retained) | Yes         |
-| Azure                 | Partial (opt-in via config) | Partial                           | No                               | No          |
+| Provider/model family | Remote compaction           | `previous_response_id` continuity | Custom WS stream                 |
+|-----------------------|-----------------------------|-----------------------------------|----------------------------------|
+| `openai/*`            | Yes                         | Yes                               | Yes                              |
+| `openai-codex/*`      | Yes                         | No (built-in transport retained)  | No (built-in transport retained) |
+| Azure                 | Partial (opt-in via config) | Partial                           | No                               |
 
 ## Install
 
@@ -69,13 +69,13 @@ One-shot, non-persistent:
 ```bash
 git clone https://github.com/algal/pi-openai-server-compaction.git
 cd pi-openai-server-compaction && npm install
-pi -e ./src/index.ts --model openai/gpt-5.6-luna
+./node_modules/.bin/pi -e ./src/index.ts --model openai/gpt-5.6-luna
 ```
 
 ## Requirements
 
 - Node `>= 22`
-- Pi `>=0.82.1 <0.83.0`
+- Pi `0.87.1` (the tested provider-stream API version)
 - Auth/config for the model you want to use must already work in Pi
 - A supported OpenAI Responses model, e.g. `openai/gpt-5.6-sol` or `openai-codex/gpt-5.6-sol`
 
@@ -90,7 +90,7 @@ For direct `openai/*` models between compactions, the extension also:
 
 - Patches requests with `store: true` and `context_management`
 - Uses `previous_response_id` for live continuation when safe
-- Provides a WebSocket-backed transport path with HTTP fallback
+- Provides a WebSocket-backed transport path with HTTP fallback, preserving Pi's current system prompt and tools
 
 For `openai-codex/*` models, the extension preserves the built-in Codex transport and only injects reconstructed remote compaction history after compaction boundaries.
 
@@ -111,7 +111,7 @@ The extension clears live continuation state on: session start/reload/resume, sw
 
 Remote compaction history is only replayed for compatible models. Cross-model turns are filtered from reconstructed replay history to prevent contamination after resume or tree navigation.
 
-Transient remote-compaction failures are retried up to three times after the initial request with abort-aware exponential backoff. A provider `Retry-After` header is honored; computed backoff is capped at 60 seconds, and a provider-requested delay longer than that gives up instead of waiting. Deterministic failures such as invalid requests and quota exhaustion fail immediately. If all retries fail but the portable summary succeeds, Pi saves the text-only summary and shows a persistent warning banner that opaque continuity was not preserved.
+Transient remote-compaction failures use abort-aware exponential backoff with the retry budget and base delay set in [Configuration](#configuration). A provider `Retry-After` header is honored; computed backoff is capped at 60 seconds, and a provider-requested delay longer than that gives up instead of waiting. Deterministic failures such as invalid requests and quota exhaustion fail immediately. If remote compaction fails but the portable summary succeeds, Pi saves the text-only summary. In interactive sessions, a warning banner reports that opaque continuity was not preserved; it survives the compaction re-render until the next compaction or session navigation.
 
 ## Data handling
 
@@ -168,11 +168,13 @@ If something goes wrong:
 
 ## Testing
 
-Smoke test (offline, verifies imports and key algorithms):
+Smoke test (offline; install local development dependencies with `npm install` first):
 
 ```bash
 npm run smoke
 ```
+
+See [TESTPLAN.md](TESTPLAN.md#offline-smoke-test) for coverage.
 
 Live end-to-end test (requires working Pi + OpenAI auth):
 

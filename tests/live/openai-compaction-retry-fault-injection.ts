@@ -136,6 +136,13 @@ async function startFaultProxy(mode: FaultMode): Promise<FaultProxy> {
   };
 
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    // Portable-summary calls can independently try auto transport. Reject that
+    // upgrade cleanly so Pi falls back to this proxy's supported SSE transport.
+    if (request.headers.upgrade) {
+      response.writeHead(426, { "content-type": "text/plain" });
+      response.end("This test proxy supports HTTP streaming only");
+      return;
+    }
     const body = await readBody(request);
     const compaction = isCompactionRequest(body);
     if (compaction) stats.compactionRequests += 1;
@@ -236,7 +243,8 @@ async function createSandboxAgentDir(root: string, proxyPort: number): Promise<s
     )}\n`,
     "utf8",
   );
-  await writeFile(join(agentDir, "settings.json"), `${JSON.stringify({ packages: [] }, null, 2)}\n`, "utf8");
+  // This HTTP pass-through proxy does not implement WebSocket upgrades.
+  await writeFile(join(agentDir, "settings.json"), `${JSON.stringify({ packages: [], transport: "sse" }, null, 2)}\n`, "utf8");
   return agentDir;
 }
 
@@ -248,6 +256,7 @@ class PiRpcClient {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string, PendingRequest>();
   private counter = 0;
+  private completedTurns = 0;
   private closed = false;
   readonly stderr: string[] = [];
 
@@ -285,7 +294,9 @@ class PiRpcClient {
       } catch {
         return;
       }
-      if (!isRecord(parsed) || parsed.type !== "response") return;
+      if (!isRecord(parsed)) return;
+      if (parsed.type === "agent_end" && parsed.willRetry !== true) this.completedTurns += 1;
+      if (parsed.type !== "response") return;
       const id = typeof parsed.id === "string" ? parsed.id : undefined;
       if (!id) return;
       const request = this.pending.get(id);
@@ -335,6 +346,23 @@ class PiRpcClient {
     return Array.isArray(data.messages) ? data.messages : [];
   }
 
+  async promptAndWait(message: string): Promise<string> {
+    const completedBefore = this.completedTurns;
+    await this.send({ type: "prompt", message });
+    const deadline = Date.now() + defaultRequestTimeoutMs;
+    while (this.completedTurns === completedBefore) {
+      expect(Date.now() < deadline, "Timed out waiting for the prompted agent turn to complete");
+      await delay(50);
+    }
+    await this.waitIdle();
+    const messages = await this.getMessages();
+    const assistant = messages.findLast((entry) => isRecord(entry) && entry.role === "assistant");
+    expect(isRecord(assistant), "Completed turn did not produce an assistant message");
+    expect(assistant.stopReason !== "error" && assistant.stopReason !== "aborted",
+      `Assistant turn failed: ${String(assistant.errorMessage ?? assistant.stopReason)}`);
+    return assistantText(messages).trim();
+  }
+
   async waitIdle(timeoutMs = 300_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -366,17 +394,17 @@ type CompactionObservation = {
   replacementHistoryLength: number;
   lastReplacementType: string | undefined;
   summaryLeaksSecret: boolean;
+  retainedHistoryLeaksSecret: boolean;
 };
 
 async function seedAndCompact(client: PiRpcClient): Promise<CompactionObservation> {
   await client.waitIdle();
-  await client.send({
-    type: "prompt",
-    message: `For later continuity testing, remember that the project codename is ${secret}. Reply only with MEMORIZED.`,
-  });
-  await client.waitIdle();
-  await client.send({ type: "prompt", message: `${compactionPadding}\nReply only with PADDING-OK.` });
-  await client.waitIdle();
+  const memorized = await client.promptAndWait(
+    `For later continuity testing, remember that the project codename is ${secret}. Reply only with MEMORIZED.`,
+  );
+  expect(memorized.includes("MEMORIZED"), `Seed turn did not acknowledge the fact: ${memorized}`);
+  const padded = await client.promptAndWait(`${compactionPadding}\nReply only with PADDING-OK.`);
+  expect(padded.includes("PADDING-OK"), `Padding turn did not complete: ${padded}`);
 
   const response = await client.send(
     {
@@ -396,13 +424,14 @@ async function seedAndCompact(client: PiRpcClient): Promise<CompactionObservatio
     replacementHistoryLength: replacementHistory.length,
     lastReplacementType: isRecord(last) && typeof last.type === "string" ? last.type : undefined,
     summaryLeaksSecret: summary.includes(secret),
+    retainedHistoryLeaksSecret: JSON.stringify(replacementHistory.filter(
+      (item) => !isRecord(item) || !["compaction", "compaction_summary"].includes(String(item.type)),
+    )).includes(secret),
   };
 }
 
 async function askForSecret(client: PiRpcClient): Promise<string> {
-  await client.send({ type: "prompt", message: "What is the project codename? Reply with just the codeword." });
-  await client.waitIdle();
-  return assistantText(await client.getMessages()).trim();
+  return client.promptAndWait("What is the project codename? Reply with just the codeword.");
 }
 
 type ScenarioResult = JsonObject;
@@ -418,13 +447,15 @@ async function runTransientRetryScenario(root: string): Promise<ScenarioResult> 
   const agentDir = await createSandboxAgentDir(join(root, "transient"), proxy.port);
 
   let client = new PiRpcClient({ sessionDir, cwd: workspace, agentDir });
-  let sessionFile = "";
+  const resumeSessionFile = join(sessionDir, "post-compaction.jsonl");
   let observation: CompactionObservation;
   let sameSessionAnswer = "";
   let resumedAnswer = "";
   try {
     observation = await seedAndCompact(client);
     expect(!observation.summaryLeaksSecret, `Text summary still contains ${secret}; scenario is inconclusive`);
+    expect(!observation.retainedHistoryLeaksSecret,
+      `Retained plaintext history still contains ${secret}; opaque-continuity scenario is inconclusive`);
     if (!baselineMode) {
       expect(
         observation.implementation === "responses_compaction_v2",
@@ -435,6 +466,10 @@ async function runTransientRetryScenario(root: string): Promise<ScenarioResult> 
         `Expected opaque compaction artifact at end of replacement history, got ${String(observation.lastReplacementType)}`,
       );
     }
+    const state = await client.getState();
+    const sessionFile = typeof state.sessionFile === "string" ? state.sessionFile : "";
+    expect(sessionFile.length > 0, "Missing session file after retried compaction");
+    await copyFile(sessionFile, resumeSessionFile);
     sameSessionAnswer = await askForSecret(client);
     if (!baselineMode) {
       expect(
@@ -442,14 +477,11 @@ async function runTransientRetryScenario(root: string): Promise<ScenarioResult> 
         `Opaque continuity lost after retried compaction; assistant answered: ${sameSessionAnswer}`,
       );
     }
-    const state = await client.getState();
-    sessionFile = typeof state.sessionFile === "string" ? state.sessionFile : "";
-    expect(sessionFile.length > 0, "Missing session file after retried compaction");
   } finally {
     await client.close();
   }
 
-  client = new PiRpcClient({ sessionDir, cwd: workspace, agentDir, sessionFile });
+  client = new PiRpcClient({ sessionDir, cwd: workspace, agentDir, sessionFile: resumeSessionFile });
   try {
     await client.waitIdle();
     resumedAnswer = await askForSecret(client);
@@ -484,6 +516,7 @@ async function runTransientRetryScenario(root: string): Promise<ScenarioResult> 
     replacementHistoryLength: observation.replacementHistoryLength,
     lastReplacementItemType: observation.lastReplacementType,
     textSummaryContainsSecret: observation.summaryLeaksSecret,
+    retainedPlaintextContainsSecret: observation.retainedHistoryLeaksSecret,
     textSummary: observation.summary,
     answerAfterCompaction: sameSessionAnswer,
     answerAfterResume: resumedAnswer,
@@ -515,12 +548,14 @@ async function runExhaustionScenario(root: string): Promise<ScenarioResult> {
   }
 
   // default max retries = 3 -> 4 attempts total
-  expect(
-    proxy.stats.compactionRequests === 4,
-    `Expected exactly 4 bounded attempts, saw ${proxy.stats.compactionRequests}`,
-  );
+  if (!baselineMode) {
+    expect(
+      proxy.stats.compactionRequests === 4,
+      `Expected exactly 4 bounded attempts, saw ${proxy.stats.compactionRequests}`,
+    );
+  }
 
-  console.log("retry-exhaustion scenario passed");
+  console.log(baselineMode ? "retry-exhaustion scenario recorded (baseline mode)" : "retry-exhaustion scenario passed");
   return {
     scenario: "retry-budget-exhaustion",
     compactionAttemptsSeenByProvider: proxy.stats.compactionRequests,
@@ -549,16 +584,18 @@ async function runNonRetryableScenario(root: string): Promise<ScenarioResult> {
     await proxy.close();
   }
 
-  expect(
-    proxy.stats.compactionRequests === 1,
-    `Deterministic 4xx must not be retried, saw ${proxy.stats.compactionRequests} attempts`,
-  );
+  if (!baselineMode) {
+    expect(
+      proxy.stats.compactionRequests === 1,
+      `Deterministic 4xx must not be retried, saw ${proxy.stats.compactionRequests} attempts`,
+    );
+  }
   expect(
     observation.implementation === undefined,
     `4xx compaction must not claim remote continuity, got ${String(observation.implementation)}`,
   );
 
-  console.log("non-retryable scenario passed");
+  console.log(baselineMode ? "non-retryable scenario recorded (baseline mode)" : "non-retryable scenario passed");
   return {
     scenario: "deterministic-4xx",
     compactionAttemptsSeenByProvider: proxy.stats.compactionRequests,
@@ -580,7 +617,9 @@ async function main(): Promise<void> {
     for (const scenario of selected) {
       results.push(await scenario.run(root));
     }
-    console.log(`\nALL FAULT-INJECTION SCENARIOS PASSED (pi ${process.env.PI_VERSION ?? "on PATH"}, ${testModel})`);
+    console.log(
+      `\n${baselineMode ? "ALL FAULT-INJECTION SCENARIOS RECORDED (baseline mode)" : "ALL FAULT-INJECTION SCENARIOS PASSED"} (pi ${process.env.PI_VERSION ?? "on PATH"}, ${testModel})`,
+    );
     console.log(JSON.stringify(results, null, 2));
   } finally {
     if (evidenceDir) {

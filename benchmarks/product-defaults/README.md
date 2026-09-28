@@ -3,11 +3,16 @@
 This benchmark compares the two product policies without forcing either representation
 to match the other's output-token count:
 
-1. Pi 0.80.9's real default compaction prompt, cut point, 20K recent-token retention,
-   and `reserveTokens` settings.
+1. The installed Pi version's real default compaction prompt, cut point,
+   recent-token retention, and `reserveTokens` settings.
 2. This extension's Responses compaction v2 request and its actual provider-native
    replay history, including retained user messages.
 3. An uncompressed full-context control.
+
+The runner imports Pi from the repository's development dependencies in
+[package.json](../../package.json). The [retained report](REPORT.md#arms) records
+the historical Pi version and defaults; running with current dependencies does
+not reproduce that dependency baseline.
 
 The fixture generator holds estimated pre-compaction context near a fixed target while
 varying the number of independent authoritative records. It replaces unrelated filler
