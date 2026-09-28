@@ -1,8 +1,8 @@
 # Validation
 
-## Current Responses compaction v2 validation
+## Recorded Responses compaction v2 validation
 
-The full live Pi RPC suite passes with both:
+Before the transcript-based provider-stream port, the full live Pi RPC suite passed with both:
 
 - `openai/gpt-5.6-luna` through the direct OpenAI Responses API
 - `openai-codex/gpt-5.6-sol` through the ChatGPT Codex subscription backend

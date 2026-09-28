@@ -69,16 +69,26 @@ The [smoke command](README.md#testing) requires the installed Pi peers to match
 the development versions in [package.json](package.json). Alongside import and
 compaction checks, `scripts/smoke-provider-api.mjs` uses Pi's actual transcript
 normalization API and a local WebSocket server to check that instructions and
-tool declarations reach `response.create`, including their absence on a later
-request. It also checks case-insensitive header overrides and null suppression
-of default headers, and preserves null overrides through both portable-summary
-generation and Pi's fallback compactor. The fixture rejects HTTP fallback and
-bounds its wait, so these protocol checks do not require provider credentials.
+tool declarations reach `response.create`, including optional warm-up and their
+absence on a later request. It also checks case-insensitive header overrides and
+null suppression of default headers, and preserves null overrides through both
+portable-summary generation and Pi's fallback compactor. The fixture rejects HTTP
+fallback and bounds its wait, so these protocol checks do not require provider credentials.
+
+`scripts/smoke.mjs` also covers:
+
+- nested streamed provider-error parsing
+- transient retry success, bounded exhaustion, non-retryable 4xx behavior, `Retry-After`, and abort during backoff
+- retry-exhaustion warning: withheld during `session_before_compact`, then written once from `session_compact` to a durable extension widget rather than `ui.notify` (rationale in the widget-key comment in `src/index.ts`). Also covered: suppressed when opaque continuity survived, retracted by the next compaction and by a session change, and dropped when the compaction is abandoned
 
 ## Automated live test
 
+Both live harnesses launch `pi` from `PATH` and require working provider auth.
+After installing the local development dependencies, run from the repository
+root and select the local CLI so it matches the [supported Pi version](README.md#requirements):
+
 ```bash
-cd /home/algal/gits/pi-openai-server-compaction
+export PATH="$PWD/node_modules/.bin:$PATH"
 node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts
 PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai/gpt-5.6-luna node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts
 PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol node --experimental-strip-types ./tests/live/openai-compaction-rpc-live.ts
@@ -86,11 +96,25 @@ PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol node --experimen
 
 The automated live harness lives in `tests/live/openai-compaction-rpc-live.ts`.
 
+Its coverage includes:
+
+- compaction continuity in the same session
+- `/model`-style switch away and back again
+- fork after compaction
+- resume/reload after compaction
+- resume/reload after switching away from and back to the compacted model
+
+Recommended follow-up live regression:
+
+- explicit tree navigation after an intervening other-model turn, followed by restart
+
 ### Live retry fault injection
 
 `tests/live/openai-compaction-retry-fault-injection.ts` drives a real `pi` session
 against the real provider through a local pass-through proxy that injects the exact
 streamed nested `server_error` observed in the field on compaction requests only.
+It uses HTTP/SSE through the proxy. Use the local CLI setup above for these commands
+as well.
 
 ```bash
 node --experimental-strip-types ./tests/live/openai-compaction-retry-fault-injection.ts
@@ -99,25 +123,13 @@ PI_OPENAI_SERVER_COMPACTION_SCENARIOS=transient,exhaustion,non-retryable \
 ```
 
 Scenarios: `transient` (retry preserves the opaque `compaction` artifact and a fact
-deliberately omitted from the text summary is still recoverable after compaction and
-after resume), `exhaustion` (bounded attempts, then a text-only fallback that does not
+absent from both the text summary and retained plaintext is still recoverable after
+compaction and after resuming an untouched post-compaction checkpoint),
+`exhaustion` (bounded attempts, then a text-only fallback that does not
 claim `details.remoteCompaction`), and `non-retryable` (HTTP 400 fails on attempt 1).
 Set `PI_OPENAI_SERVER_COMPACTION_BASELINE=1` with
 `PI_OPENAI_SERVER_COMPACTION_EXTENSION=<path to a pre-fix src/index.ts>` to record the
 pre-fix behaviour for an A/B comparison instead of asserting the retry contract.
-
-Current automated coverage includes:
-- nested streamed provider-error parsing
-- transient retry success, bounded exhaustion, non-retryable 4xx behavior, `Retry-After`, and abort during backoff
-- retry-exhaustion warning: withheld during `session_before_compact`, then written once from `session_compact` to a durable extension widget rather than `ui.notify` (rationale in the widget-key comment in `src/index.ts`). Also covered: suppressed when opaque continuity survived, retracted by the next compaction and by a session change, and dropped when the compaction is abandoned (`npm run smoke`)
-- compaction continuity in the same session
-- `/model`-style switch away and back again
-- fork after compaction
-- resume/reload after compaction
-- resume/reload after switching away from and back to the compacted model
-
-Recommended follow-up live regression:
-- explicit tree navigation after an intervening other-model turn, followed by restart
 
 ## Controlled compaction benchmark
 

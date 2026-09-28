@@ -116,7 +116,7 @@ async function testSummaryHeaders() {
   }
 }
 
-async function testTranscriptWebSocket() {
+async function testTranscriptWebSocket(warmup = false) {
   const transcript = normalizeContext({
     systemPrompt: "TRANSCRIPT_SYSTEM_PROMPT",
     tools: [{
@@ -183,7 +183,7 @@ async function testTranscriptWebSocket() {
     const stream = createOpenAIWebSocketStreamFn({ url: `ws://127.0.0.1:${port}` })(
       model,
       transcript,
-      { apiKey: "test-key", sessionId: "transcript-test", transport: "websocket", signal: controller.signal },
+      { apiKey: "test-key", sessionId: "transcript-test", transport: "websocket", openaiWsWarmup: warmup, signal: controller.signal },
     );
     const result = await Promise.race([stream.result(), deadline]);
     assert.equal(result.stopReason, "stop", result.errorMessage);
@@ -194,7 +194,14 @@ async function testTranscriptWebSocket() {
     );
     const emptyResult = await Promise.race([emptyStream.result(), deadline]);
     assert.equal(emptyResult.stopReason, "stop", emptyResult.errorMessage);
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, warmup ? 3 : 2);
+    if (warmup) {
+      const warmupRequest = requests.shift();
+      assert.equal(warmupRequest.type, "response.create");
+      assert.equal(warmupRequest.generate, false);
+      assert.equal(warmupRequest.instructions, "TRANSCRIPT_SYSTEM_PROMPT");
+      assert.deepEqual(warmupRequest.tools, requests[0].tools);
+    }
 
     assert.equal(requests[0].type, "response.create");
     assert.equal(requests[0].instructions, "TRANSCRIPT_SYSTEM_PROMPT");
@@ -229,6 +236,7 @@ try {
   await testCompactionHeaders();
   await testSummaryHeaders();
   await testTranscriptWebSocket();
+  await testTranscriptWebSocket(true);
 } finally {
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
