@@ -206,55 +206,39 @@ function extractCodexAccountId(token: string): string {
   return accountId;
 }
 
-function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<string, string> {
-  const configuredFeatures = Object.entries(headers)
-    .find(([name]) => name.toLowerCase() === "x-codex-beta-features")?.[1]
-    ?.split(",")
-    .map((feature) => feature.trim())
-    .filter(Boolean) ?? [];
-  const headersWithoutFeature = Object.fromEntries(
-    Object.entries(headers).filter(([name]) => name.toLowerCase() !== "x-codex-beta-features"),
-  );
-  const features = [...new Set([...configuredFeatures, REMOTE_COMPACTION_V2_FEATURE])];
-  return {
-    ...headersWithoutFeature,
-    "x-codex-beta-features": features.join(","),
-  };
-}
-
-function withoutNullHeaders(headers: ProviderHeaders | undefined): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(headers ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-  );
-}
-
 export function buildRemoteCompactionHeaders(params: {
   model: Model<any>;
   apiKey: string;
   headers?: ProviderHeaders;
   sessionId?: string;
 }): Record<string, string> {
+  if (!supportsRemoteCompactionModel(params.model)) {
+    throw new Error("Remote compaction v2 headers are not supported for this model.");
+  }
   const codexIdentityHeaders = buildCodexIdentityHeaders(params.sessionId);
-  const commonHeaders = withRemoteCompactionV2Feature({
+  const headers = new Headers({
     authorization: `Bearer ${params.apiKey}`,
     ...codexIdentityHeaders,
-    ...withoutNullHeaders(params.headers),
     accept: "text/event-stream",
     "content-type": "application/json",
-  });
-  if (isDirectOpenAIResponsesModel(params.model)) {
-    return commonHeaders;
-  }
-  if (isOpenAICodexResponsesModel(params.model)) {
-    return {
-      ...commonHeaders,
+    "x-codex-beta-features": REMOTE_COMPACTION_V2_FEATURE,
+    ...(isOpenAICodexResponsesModel(params.model) ? {
       "chatgpt-account-id": extractCodexAccountId(params.apiKey),
       originator: "pi",
       "user-agent": `pi-openai-server-compaction (${platform()} ${release()}; ${arch()})`,
       "OpenAI-Beta": "responses=experimental",
-    };
+    } : {}),
+  });
+  for (const [name, value] of Object.entries(params.headers ?? {})) {
+    if (value === null) headers.delete(name);
+    else headers.set(name, value);
   }
-  throw new Error("Remote compaction v2 headers are not supported for this model.");
+  const configuredFeatures = headers.get("x-codex-beta-features");
+  if (configuredFeatures !== null) {
+    const features = configuredFeatures.split(",").map((feature) => feature.trim()).filter(Boolean);
+    headers.set("x-codex-beta-features", [...new Set([...features, REMOTE_COMPACTION_V2_FEATURE])].join(","));
+  }
+  return Object.fromEntries(headers);
 }
 
 function isAssistantPhase(value: unknown): value is AssistantPhase {
@@ -753,7 +737,7 @@ export async function generateBestEffortLocalSummary(params: {
       params.preparation,
       params.model,
       params.apiKey,
-      withoutNullHeaders(params.headers),
+      params.headers as Parameters<typeof compact>[3],
       params.customInstructions,
       params.signal,
       params.thinkingLevel,

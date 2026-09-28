@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { WebSocketServer } from "ws";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localNodeModules = join(repoRoot, "node_modules");
@@ -100,8 +99,6 @@ const { default: extensionFactory, isTextOnlyFallbackCompaction } = await import
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
 
 const {
-  buildCodexWebSocketHeaders,
-  buildRemoteCompactionHeaders,
   buildRemoteCompactionDetails,
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
@@ -115,8 +112,6 @@ const {
   sleepForRemoteCompactionRetry,
 } = await import(pathToFileURL(join(repoRoot, "src", "remote-compaction.ts")).href);
 const {
-  createOpenAIWebSocketStreamFn,
-  releaseWsSession,
   selectInputItemsForContinuation,
 } = await import(pathToFileURL(join(repoRoot, "src", "openai-ws-stream.ts")).href);
 
@@ -494,29 +489,6 @@ assert.deepEqual(compactedHistory.map((item) => item.type), ["message", "message
 assert.equal(compactedHistory[0].role, "user");
 assert.equal(compactedHistory[1].role, "assistant");
 
-const compactionHeaders = buildRemoteCompactionHeaders({
-  model: {
-    provider: "openai",
-    api: "openai-responses",
-    id: "gpt-5.4-nano",
-  },
-  apiKey: "sk-test",
-  sessionId: "session-123",
-  headers: { "x-extra": "yes" },
-});
-assert.equal(compactionHeaders.authorization, "Bearer sk-test");
-assert.equal(compactionHeaders.session_id, "session-123");
-assert.equal(compactionHeaders["x-codex-window-id"], "session-123:0");
-assert.match(compactionHeaders["x-codex-installation-id"], /^[0-9a-f-]{36}$/);
-assert.equal(compactionHeaders["x-extra"], "yes");
-assert.equal(compactionHeaders["x-codex-beta-features"], "remote_compaction_v2");
-assert.equal(compactionHeaders.accept, "text/event-stream");
-
-const websocketHeaders = buildCodexWebSocketHeaders("session-123");
-assert.equal(websocketHeaders["x-client-request-id"], "session-123");
-assert.equal(websocketHeaders.session_id, "session-123");
-assert.equal(websocketHeaders["x-codex-window-id"], "session-123:0");
-
 const detailsRoundTrip = extractRemoteCompactionDetails({
   remoteCompaction: buildRemoteCompactionDetails(
     {
@@ -791,82 +763,6 @@ try {
   }
 }
 
-const { getCurrentSystemPrompt, getCurrentTools, normalizeContext } = await import("@earendil-works/pi-ai");
-const transcript = normalizeContext({
-  systemPrompt: "TRANSCRIPT_SYSTEM_PROMPT",
-  tools: [{
-    name: "transcript_tool",
-    description: "Tool declared in Pi's transcript",
-    parameters: { type: "object", properties: {} },
-  }],
-  messages: [{ role: "user", content: "hello from transcript", timestamp: 0 }],
-});
-const emptyTranscript = normalizeContext({ messages: [] });
-assert.equal(getCurrentSystemPrompt(emptyTranscript.messages), "");
-assert.deepEqual(getCurrentTools(emptyTranscript.messages), []);
-
-const websocketServer = new WebSocketServer({ port: 0 });
-await new Promise((resolve) => websocketServer.once("listening", resolve));
-const { port } = websocketServer.address();
-const requests = [];
-const requestsPromise = new Promise((resolve) => {
-  websocketServer.once("connection", (socket) => {
-    socket.on("message", (message) => {
-      requests.push(JSON.parse(message.toString()));
-      socket.send(JSON.stringify({
-        type: "response.completed",
-        response: {
-          id: `resp_transcript_test_${requests.length}`,
-          object: "response",
-          created_at: 0,
-          status: "completed",
-          model: "gpt-transcript-test",
-          output: [],
-          usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-        },
-      }));
-      if (requests.length === 2) resolve(requests);
-    });
-  });
-});
-
-try {
-  const model = {
-    api: "openai-responses",
-    provider: "openai",
-    id: "gpt-transcript-test",
-    baseUrl: "https://api.openai.com/v1",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  };
-  const stream = createOpenAIWebSocketStreamFn({ url: `ws://127.0.0.1:${port}` })(
-    model,
-    transcript,
-    { apiKey: "test-key", sessionId: "transcript-test", transport: "websocket" },
-  );
-  await stream.result();
-  const emptyStream = createOpenAIWebSocketStreamFn({ url: `ws://127.0.0.1:${port}` })(
-    model,
-    emptyTranscript,
-    { apiKey: "test-key", sessionId: "transcript-test", transport: "websocket" },
-  );
-  await emptyStream.result();
-  await requestsPromise;
-
-  assert.equal(requests[0].type, "response.create");
-  assert.equal(requests[0].instructions, "TRANSCRIPT_SYSTEM_PROMPT");
-  assert.deepEqual(requests[0].tools, [{
-    type: "function",
-    name: "transcript_tool",
-    description: "Tool declared in Pi's transcript",
-    parameters: { type: "object", properties: {} },
-  }]);
-  assert.equal(requests[1].instructions, undefined);
-  assert.equal(requests[1].tools, undefined);
-} finally {
-  releaseWsSession("transcript-test");
-  await new Promise((resolve) => websocketServer.close(resolve));
-}
+await import("./smoke-provider-api.mjs");
 
 console.log("smoke ok");
