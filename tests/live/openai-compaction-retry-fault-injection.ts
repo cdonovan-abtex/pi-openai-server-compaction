@@ -418,7 +418,7 @@ async function runTransientRetryScenario(root: string): Promise<ScenarioResult> 
   const agentDir = await createSandboxAgentDir(join(root, "transient"), proxy.port);
 
   let client = new PiRpcClient({ sessionDir, cwd: workspace, agentDir });
-  let sessionFile = "";
+  const resumeSessionFile = join(sessionDir, "post-compaction.jsonl");
   let observation: CompactionObservation;
   let sameSessionAnswer = "";
   let resumedAnswer = "";
@@ -435,6 +435,10 @@ async function runTransientRetryScenario(root: string): Promise<ScenarioResult> 
         `Expected opaque compaction artifact at end of replacement history, got ${String(observation.lastReplacementType)}`,
       );
     }
+    const state = await client.getState();
+    const sessionFile = typeof state.sessionFile === "string" ? state.sessionFile : "";
+    expect(sessionFile.length > 0, "Missing session file after retried compaction");
+    await copyFile(sessionFile, resumeSessionFile);
     sameSessionAnswer = await askForSecret(client);
     if (!baselineMode) {
       expect(
@@ -442,14 +446,11 @@ async function runTransientRetryScenario(root: string): Promise<ScenarioResult> 
         `Opaque continuity lost after retried compaction; assistant answered: ${sameSessionAnswer}`,
       );
     }
-    const state = await client.getState();
-    sessionFile = typeof state.sessionFile === "string" ? state.sessionFile : "";
-    expect(sessionFile.length > 0, "Missing session file after retried compaction");
   } finally {
     await client.close();
   }
 
-  client = new PiRpcClient({ sessionDir, cwd: workspace, agentDir, sessionFile });
+  client = new PiRpcClient({ sessionDir, cwd: workspace, agentDir, sessionFile: resumeSessionFile });
   try {
     await client.waitIdle();
     resumedAnswer = await askForSecret(client);
@@ -515,12 +516,14 @@ async function runExhaustionScenario(root: string): Promise<ScenarioResult> {
   }
 
   // default max retries = 3 -> 4 attempts total
-  expect(
-    proxy.stats.compactionRequests === 4,
-    `Expected exactly 4 bounded attempts, saw ${proxy.stats.compactionRequests}`,
-  );
+  if (!baselineMode) {
+    expect(
+      proxy.stats.compactionRequests === 4,
+      `Expected exactly 4 bounded attempts, saw ${proxy.stats.compactionRequests}`,
+    );
+  }
 
-  console.log("retry-exhaustion scenario passed");
+  console.log(baselineMode ? "retry-exhaustion scenario recorded (baseline mode)" : "retry-exhaustion scenario passed");
   return {
     scenario: "retry-budget-exhaustion",
     compactionAttemptsSeenByProvider: proxy.stats.compactionRequests,
@@ -549,16 +552,18 @@ async function runNonRetryableScenario(root: string): Promise<ScenarioResult> {
     await proxy.close();
   }
 
-  expect(
-    proxy.stats.compactionRequests === 1,
-    `Deterministic 4xx must not be retried, saw ${proxy.stats.compactionRequests} attempts`,
-  );
+  if (!baselineMode) {
+    expect(
+      proxy.stats.compactionRequests === 1,
+      `Deterministic 4xx must not be retried, saw ${proxy.stats.compactionRequests} attempts`,
+    );
+  }
   expect(
     observation.implementation === undefined,
     `4xx compaction must not claim remote continuity, got ${String(observation.implementation)}`,
   );
 
-  console.log("non-retryable scenario passed");
+  console.log(baselineMode ? "non-retryable scenario recorded (baseline mode)" : "non-retryable scenario passed");
   return {
     scenario: "deterministic-4xx",
     compactionAttemptsSeenByProvider: proxy.stats.compactionRequests,
@@ -580,7 +585,9 @@ async function main(): Promise<void> {
     for (const scenario of selected) {
       results.push(await scenario.run(root));
     }
-    console.log(`\nALL FAULT-INJECTION SCENARIOS PASSED (pi ${process.env.PI_VERSION ?? "on PATH"}, ${testModel})`);
+    console.log(
+      `\n${baselineMode ? "ALL FAULT-INJECTION SCENARIOS RECORDED (baseline mode)" : "ALL FAULT-INJECTION SCENARIOS PASSED"} (pi ${process.env.PI_VERSION ?? "on PATH"}, ${testModel})`,
+    );
     console.log(JSON.stringify(results, null, 2));
   } finally {
     if (evidenceDir) {
