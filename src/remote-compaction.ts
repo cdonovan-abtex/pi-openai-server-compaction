@@ -19,7 +19,7 @@ import {
   serializeConversation,
   type CompactionResult,
 } from "@earendil-works/pi-coding-agent";
-import { calculateCost, type Model, type Usage } from "@earendil-works/pi-ai";
+import { calculateCost, type Model, type ProviderHeaders, type Usage } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import { isRecord } from "./config.ts";
 import {
@@ -222,17 +222,23 @@ function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<
   };
 }
 
+function withoutNullHeaders(headers: ProviderHeaders | undefined): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
 export function buildRemoteCompactionHeaders(params: {
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   sessionId?: string;
 }): Record<string, string> {
   const codexIdentityHeaders = buildCodexIdentityHeaders(params.sessionId);
   const commonHeaders = withRemoteCompactionV2Feature({
     authorization: `Bearer ${params.apiKey}`,
     ...codexIdentityHeaders,
-    ...(params.headers ?? {}),
+    ...withoutNullHeaders(params.headers),
     accept: "text/event-stream",
     "content-type": "application/json",
   });
@@ -689,7 +695,7 @@ export async function generatePortableSummary(params: {
   messages: AgentMessage[];
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   customInstructions?: string;
   signal?: AbortSignal;
   firstKeptEntryId: string;
@@ -733,7 +739,7 @@ export async function generateBestEffortLocalSummary(params: {
   messages: AgentMessage[];
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   customInstructions?: string;
   signal?: AbortSignal;
   thinkingLevel?: ThinkingLevel;
@@ -747,7 +753,7 @@ export async function generateBestEffortLocalSummary(params: {
       params.preparation,
       params.model,
       params.apiKey,
-      params.headers,
+      withoutNullHeaders(params.headers),
       params.customInstructions,
       params.signal,
       params.thinkingLevel,
@@ -1099,7 +1105,7 @@ async function callRemoteCompactionEndpointOnce(
 export async function callRemoteCompactionEndpoint(params: {
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   sessionId?: string;
   input: ResponseItem[];
   instructions?: string;
@@ -1217,8 +1223,7 @@ function assistantMessageMatchesModelKey(
 ): boolean {
   const target = parseModelKeyParts(targetModelKey);
   if (!target) return false;
-  if (!isRecord(message)) return false;
-  return message.provider === target.provider && message.model === target.id;
+  return message.role === "assistant" && message.provider === target.provider && message.model === target.id;
 }
 
 export function reconstructRemoteCompactionStateFromBranch(params: {
