@@ -90,7 +90,7 @@ For direct `openai/*` models between compactions, the extension also:
 
 - Patches requests with `store: true` and `context_management`
 - Uses `previous_response_id` for live continuation when safe
-- Provides a WebSocket-backed transport path with HTTP fallback
+- Provides a WebSocket-backed transport path with HTTP fallback, preserving Pi's current system prompt and tools
 
 For `openai-codex/*` models, the extension preserves the built-in Codex transport and only injects reconstructed remote compaction history after compaction boundaries.
 
@@ -111,7 +111,7 @@ The extension clears live continuation state on: session start/reload/resume, sw
 
 Remote compaction history is only replayed for compatible models. Cross-model turns are filtered from reconstructed replay history to prevent contamination after resume or tree navigation.
 
-Transient remote-compaction failures are retried up to three times after the initial request with abort-aware exponential backoff. A provider `Retry-After` header is honored; computed backoff is capped at 60 seconds, and a provider-requested delay longer than that gives up instead of waiting. Deterministic failures such as invalid requests and quota exhaustion fail immediately. If all retries fail but the portable summary succeeds, Pi saves the text-only summary and shows a persistent warning banner that opaque continuity was not preserved.
+Transient remote-compaction failures use abort-aware exponential backoff with the retry budget and base delay set in [Configuration](#configuration). A provider `Retry-After` header is honored; computed backoff is capped at 60 seconds, and a provider-requested delay longer than that gives up instead of waiting. Deterministic failures such as invalid requests and quota exhaustion fail immediately. If remote compaction fails but the portable summary succeeds, Pi saves the text-only summary. In interactive sessions, a warning banner reports that opaque continuity was not preserved; it survives the compaction re-render until the next compaction or session navigation.
 
 ## Data handling
 
@@ -168,11 +168,13 @@ If something goes wrong:
 
 ## Testing
 
-Smoke test (offline, verifies imports and key algorithms):
+Smoke test (offline; install local development dependencies with `npm install` first):
 
 ```bash
 npm run smoke
 ```
+
+See [TESTPLAN.md](TESTPLAN.md#offline-smoke-test) for coverage.
 
 Live end-to-end test (requires working Pi + OpenAI auth):
 

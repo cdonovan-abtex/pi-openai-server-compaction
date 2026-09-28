@@ -63,6 +63,18 @@
 - Confirm footer/session stats show non-zero token/cost totals.
 - Compare rough totals against dashboard/provider logs when possible.
 
+## Offline smoke test
+
+The [smoke command](README.md#testing) requires the installed Pi peers to match
+the development versions in [package.json](package.json). Alongside import and
+compaction checks, `scripts/smoke-provider-api.mjs` uses Pi's actual transcript
+normalization API and a local WebSocket server to check that instructions and
+tool declarations reach `response.create`, including their absence on a later
+request. It also checks case-insensitive header overrides and null suppression
+of default headers, and preserves null overrides through both portable-summary
+generation and Pi's fallback compactor. The fixture rejects HTTP fallback and
+bounds its wait, so these protocol checks do not require provider credentials.
+
 ## Automated live test
 
 ```bash

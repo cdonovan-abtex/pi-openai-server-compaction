@@ -737,6 +737,8 @@ export async function generateBestEffortLocalSummary(params: {
       params.preparation,
       params.model,
       params.apiKey,
+      // Pi's compact() type excludes null, but forwards headers unchanged.
+      // Preserve null overrides so the provider can suppress default headers.
       params.headers as Parameters<typeof compact>[3],
       params.customInstructions,
       params.signal,
