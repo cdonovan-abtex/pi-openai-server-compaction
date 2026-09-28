@@ -39,16 +39,16 @@ values. (A little reverse engineering suggests the blobs are produced through
 a textual prompt, for what it is worth:
 https://x.com/alexisgallagher/status/2042396986327060736?s=20 .)
 
-> **Status:** experimental but live-tested against real Pi + real OpenAI backends.
+> **Status:** experimental. See [recorded validation](VALIDATION.md#recorded-responses-compaction-v2-validation) for live backend evidence and its version context.
 > Recommended rollout: install project-local first, use for a week, keep rollback easy.
 
 ## Support matrix
 
-| Provider/model family | Remote compaction           | `previous_response_id` continuity | Custom WS stream                 | Live-tested |
-|-----------------------|-----------------------------|-----------------------------------|----------------------------------|-------------|
-| `openai/*`            | Yes                         | Yes                               | Yes                              | Yes         |
-| `openai-codex/*`      | Yes                         | No (built-in transport retained)  | No (built-in transport retained) | Yes         |
-| Azure                 | Partial (opt-in via config) | Partial                           | No                               | No          |
+| Provider/model family | Remote compaction           | `previous_response_id` continuity | Custom WS stream                 |
+|-----------------------|-----------------------------|-----------------------------------|----------------------------------|
+| `openai/*`            | Yes                         | Yes                               | Yes                              |
+| `openai-codex/*`      | Yes                         | No (built-in transport retained)  | No (built-in transport retained) |
+| Azure                 | Partial (opt-in via config) | Partial                           | No                               |
 
 ## Install
 
@@ -69,7 +69,7 @@ One-shot, non-persistent:
 ```bash
 git clone https://github.com/algal/pi-openai-server-compaction.git
 cd pi-openai-server-compaction && npm install
-pi -e ./src/index.ts --model openai/gpt-5.6-luna
+./node_modules/.bin/pi -e ./src/index.ts --model openai/gpt-5.6-luna
 ```
 
 ## Requirements

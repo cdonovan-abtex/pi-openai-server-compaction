@@ -123,6 +123,12 @@ Responsibilities:
 
 This file is the core of the actual compaction-boundary behavior.
 
+Remote compaction applies Pi's provider header overrides case-insensitively:
+string values replace defaults and `null` removes them. The
+`x-codex-beta-features` value includes `remote_compaction_v2` unless that header
+is explicitly suppressed with `null`. Portable-summary generation and Pi's
+fallback compactor receive the overrides unchanged, including `null` values.
+
 ### `src/openai-ws-stream.ts`
 
 The custom stream implementation.
